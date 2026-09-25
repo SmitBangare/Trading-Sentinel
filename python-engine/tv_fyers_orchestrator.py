@@ -294,18 +294,24 @@ async def handle_tv_entry_signal(fyers, db_path: str, payload: dict) -> dict:
         await mark_signal_handled(db_path, signal.signal_id, result["reason"])
         return result
 
-    # ---- AI candle-trend gate (replaces the old RSI-threshold veto; see
-    # tv_fyers_ai_gate.py's module docstring for the safety posture) ------
-    ai_ok, ai_reason = await evaluate_trend_with_ai(
-        candles, signal.direction, signal.underlying_price, rsi=rsi,
-    )
-    if not ai_ok:
-        result["reason"] = ai_reason
-        logger.info(
-            "tv_fyers_entry_rejected signal_id=%s reason=%s", signal.signal_id, ai_reason,
+    # ---- AI candle-trend gate: an ADDITIONAL check on top of the free
+    # deterministic ladder above (which already includes RSI), only run
+    # when TV_FYERS_ANTHROPIC_API_KEY is actually configured -- the AI
+    # API is a real, paid cost with no free tier, so this pipeline must
+    # keep working (and cost nothing) with no key set at all. See
+    # tv_fyers_ai_gate.py's module docstring for the safety posture when
+    # it IS configured. --------------------------------------------------
+    if settings.TV_FYERS_ANTHROPIC_API_KEY:
+        ai_ok, ai_reason = await evaluate_trend_with_ai(
+            candles, signal.direction, signal.underlying_price, rsi=rsi,
         )
-        await mark_signal_handled(db_path, signal.signal_id, result["reason"])
-        return result
+        if not ai_ok:
+            result["reason"] = ai_reason
+            logger.info(
+                "tv_fyers_entry_rejected signal_id=%s reason=%s", signal.signal_id, ai_reason,
+            )
+            await mark_signal_handled(db_path, signal.signal_id, result["reason"])
+            return result
 
     # ---- stop/target derivation (TradingView sends direction only; the
     # bot derives and owns every exit itself, per the approved plan) ----
@@ -409,6 +415,16 @@ async def handle_ai_candle_scan(fyers, db_path: str, now_ist: datetime) -> dict:
         result["reason"] = "paper_disabled"
         return result
 
+    # This entire path only makes sense with AI configured -- there is no
+    # deterministic equivalent for "decide a direction from scratch off
+    # candles" the way rsi_veto double-checks a TradingView-supplied
+    # direction. Skip before even fetching candles (a real, paid,
+    # no-free-tier API call otherwise) so an unconfigured key costs
+    # nothing every 5 minutes rather than just failing closed loudly.
+    if not settings.TV_FYERS_ANTHROPIC_API_KEY:
+        result["reason"] = "ai_unavailable_no_key"
+        return result
+
     candles, rsi, atr = await _fetch_candles_rsi_atr(fyers, now_ist)
     if not candles:
         result["reason"] = "ai_unavailable_no_candles"
@@ -445,7 +461,7 @@ async def handle_ai_candle_scan(fyers, db_path: str, now_ist: datetime) -> dict:
         return result
 
     ctx = VetoContext(
-        direction=plan.direction, rsi=None, iv=contract.iv,
+        direction=plan.direction, rsi=rsi, iv=contract.iv,
         oi=contract.oi, volume=contract.volume,
         bid=contract.bid, ask=contract.ask,
         quote_age_sec=contract.quote_age_sec,

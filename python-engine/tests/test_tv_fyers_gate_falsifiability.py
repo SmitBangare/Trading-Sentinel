@@ -48,6 +48,11 @@ def test_ladder_reports_first_failure_in_spec_order():
 
 @pytest.mark.parametrize("overrides,expected", [
     ({"signal_age_sec": 9999.0}, "signal_stale"),
+    ({"direction": "CE", "rsi": 30.0}, "rsi_below_long_min"),
+    ({"direction": "CE", "rsi": 90.0}, "rsi_overbought"),
+    ({"direction": "PE", "rsi": 70.0}, "rsi_above_short_max"),
+    ({"direction": "PE", "rsi": 10.0}, "rsi_oversold"),
+    ({"rsi": None}, "rsi_unavailable"),
     ({"iv": None}, "iv_unavailable"),
     ({"iv": 0.01}, "iv_out_of_band"),
     ({"iv": 2.5}, "iv_out_of_band"),
@@ -66,9 +71,15 @@ def test_each_gate_rejects_its_failure_mode(overrides, expected):
 
 
 def test_direction_short_side_passes_symmetric_witness():
-    """PE (short bias) also passes the deterministic ladder -- direction
-    itself is no longer gated here (that judgment moved to the AI gate;
-    see tv_fyers_ai_gate.py)."""
-    ctx = dataclasses.replace(make_witness_context(), direction="PE")
+    """PE (short bias) has its own satisfiable witness, mirroring the CE
+    default witness -- RSI 40 is inside the short band (20-50)."""
+    ctx = dataclasses.replace(make_witness_context(), direction="PE", rsi=40.0)
     ok, reason = evaluate_tv_entry(ctx)
     assert ok, f"short-side witness rejected by: {reason}"
+
+
+def test_unknown_direction_is_rejected_not_silently_accepted():
+    ctx = dataclasses.replace(make_witness_context(), direction="LONG")
+    ok, reason = evaluate_tv_entry(ctx)
+    assert not ok
+    assert reason == "rsi_unknown_direction"

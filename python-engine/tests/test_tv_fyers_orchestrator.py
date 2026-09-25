@@ -276,25 +276,35 @@ class TestHandleTvEntrySignal:
         assert await open_positions(db_path, "TV_FYERS_PAPER") == []
 
     @pytest.mark.asyncio
-    async def test_ai_gate_fails_closed_by_default(self, tmp_path, monkeypatch):
-        """No ANTHROPIC key configured in test settings -- a signal that
-        clears every deterministic gate must still be rejected, not
-        silently executed. Fail-closed is the whole safety point of
-        tv_fyers_ai_gate.py; this is the regression test for it."""
+    async def test_no_key_skips_ai_gate_and_executes_on_deterministic_gates_alone(self, tmp_path, monkeypatch):
+        """[COST 2026-09-25] No TV_FYERS_ANTHROPIC_API_KEY configured --
+        the real, default, free-of-charge state. A signal that clears the
+        deterministic ladder (RSI included) must execute without ever
+        attempting an AI call -- the API is a real paid cost with no free
+        tier, so this pipeline must keep working, at zero cost, with no
+        key set at all."""
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
         fyers = _mock_fyers_with_candles()
         monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
+        ai_mock = AsyncMock()
+        monkeypatch.setattr(orch, "evaluate_trend_with_ai", ai_mock)
 
-        result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
-        assert result["executed"] is False
-        assert result["reason"] == "ai_unavailable_no_key"
-        assert await open_positions(db_path, "TV_FYERS_PAPER") == []
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)):
+            result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
+        assert result["executed"] is True, result["reason"]
+        ai_mock.assert_not_called()
+        assert len(await open_positions(db_path, "TV_FYERS_PAPER")) == 1
 
     @pytest.mark.asyncio
-    async def test_ai_gate_rejection_blocks_execution(self, tmp_path, monkeypatch):
+    async def test_ai_gate_rejection_blocks_execution_when_key_configured(self, tmp_path, monkeypatch):
+        """With a key configured, the AI gate becomes an ADDITIONAL check
+        on top of the (already-passing) deterministic ladder -- not a
+        replacement for it."""
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
         fyers = _mock_fyers_with_candles()
         monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
         monkeypatch.setattr(orch, "evaluate_trend_with_ai", AsyncMock(return_value=(False, "ai_reject_choppy_no_clear_trend")))
@@ -330,9 +340,30 @@ class TestHandleAiCandleScan:
     dashboard's whole point is showing what the AI saw and decided)."""
 
     @pytest.mark.asyncio
+    async def test_no_key_skips_entirely_without_fetching_candles(self, tmp_path, monkeypatch):
+        """The default, free state: no TV_FYERS_ANTHROPIC_API_KEY. This
+        whole path must cost nothing and touch nothing -- not even a
+        candle fetch -- rather than fail closed loudly every 5 minutes."""
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        fyers = _mock_fyers_with_candles()
+        ai_mock = AsyncMock()
+        monkeypatch.setattr(orch, "analyze_and_plan_trade", ai_mock)
+
+        result = await orch.handle_ai_candle_scan(fyers, db_path, _ist(2026, 9, 25, 10, 0))
+        assert result["executed"] is False
+        assert result["reason"] == "ai_unavailable_no_key"
+        assert result["signal_id"] is None
+        ai_mock.assert_not_called()
+        fyers.get_historical.assert_not_called()
+        assert await open_positions(db_path, "TV_FYERS_PAPER") == []
+
+    @pytest.mark.asyncio
     async def test_no_trade_decision_persists_signal_without_executing(self, tmp_path, monkeypatch):
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
         fyers = _mock_fyers_with_candles()
         monkeypatch.setattr(orch, "analyze_and_plan_trade", AsyncMock(return_value=(None, "ai_no_trade_choppy")))
 
@@ -361,6 +392,8 @@ class TestHandleAiCandleScan:
     async def test_happy_path_executes_and_persists_position(self, tmp_path, monkeypatch):
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
         fyers = _mock_fyers_with_candles()
         plan = orch.AiTradePlan(
             direction="CE", stop_underlying=24400.0, target_underlying=24700.0,
@@ -388,6 +421,8 @@ class TestHandleAiCandleScan:
         has to check out, exactly like the TradingView-triggered path."""
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
         fyers = _mock_fyers_with_candles()
         plan = orch.AiTradePlan(
             direction="CE", stop_underlying=24400.0, target_underlying=24700.0,
@@ -410,6 +445,7 @@ class TestHandleAiCandleScan:
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
         from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
         monkeypatch.setattr(settings, "TV_FYERS_MAX_CONCURRENT", 1)
         await insert_position(
             db_path, source="TV_FYERS_PAPER", signal_id="prior", symbol="NSE:NIFTY24SEP24000CE",
