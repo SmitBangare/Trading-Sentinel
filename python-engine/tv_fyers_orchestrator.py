@@ -26,16 +26,17 @@ tracks the underlying SPOT INDEX instead -- universally available across
 brokers -- as the safe default; revisit once real Fyers market data has
 been explored.
 
-[OPEN ITEM -- also flagged, more fundamental] Resolving an actual
-tradeable Fyers OPTION SYMBOL (specific strike + expiry) requires real
-Fyers instrument/options-chain data (available strikes, OI, expiries).
-fyers_client.py's v1 scope is deliberately quotes/historical/place_order
-only -- no instrument dump. _resolve_option_contract() below is an
-explicit stub for this reason: guessing at NSE's weekly-expiry weekday
-convention (which has changed more than once historically) to fabricate
-a plausible-looking symbol would risk silently mispricing a contract in
-a way that looks like working code. It is safer and more honest to make
-this gap visible than to paper over it.
+[RESOLVED 2026-09-25] Contract resolution was a stub until real Fyers
+credentials existed. Now wired against the real `optionchain()` endpoint
+(fyers_client.get_option_chain), confirmed live against a real Fyers
+account -- see _resolve_option_contract() below. Two real gaps that
+endpoint's response has, both handled explicitly rather than guessed:
+  - No IV field: implied volatility is derived via Black-Scholes
+    (options_math.implied_vol, the SAME function fno_chain.py uses for
+    the Zerodha-based module) from the live premium.
+  - No lot size field: NIFTY's lot size is a periodically-revised NSE/
+    SEBI constant, not something the API exposes -- hardcoded as
+    _NIFTY_LOT_SIZE below with the revision date cited, not fetched.
 """
 from __future__ import annotations
 
@@ -49,7 +50,9 @@ import structlog
 import tv_fyers_positions as tvpos
 from config import settings
 from engine import calc_rsi_series, calc_atr
+from fno_chain import RISK_FREE_RATE, years_to_expiry
 from fno_costs import calc_fno_costs  # exchange-mandated STT/GST dominate; brokerage delta is small -- v1 approximation
+from options_math import implied_vol
 from tv_fyers_executor import TvFyersExecutor
 from tv_fyers_gates import GateContext as VetoContext, evaluate_tv_entry
 from tv_fyers_signal import TvFyersSignal, mark_signal_handled
@@ -61,12 +64,19 @@ IST = pytz.timezone("Asia/Kolkata")
 # option contract is resolved -- this part needs no instrument dump).
 _UNDERLYING_INDEX_SYMBOL = "NSE:NIFTY50-INDEX"
 
+# [LOT-SIZE 2026-09-25] NIFTY options lot size, effective from the
+# January 2026 NSE/SEBI index-derivatives contract-size revision
+# (lot sizes were rebased to keep notional value inside the SEBI-
+# mandated Rs 10-15L band). Confirmed via public NSE/market-data
+# sources at the time this was wired up -- NOT fetched dynamically,
+# because Fyers' optionchain() response carries no lot-size field.
+# Re-verify against NSE's circular if this is ever revised again.
+_NIFTY_LOT_SIZE = 65
+
 
 @dataclass
 class ResolvedContract:
-    """What execution needs once contract resolution exists (rollout
-    step 7+). Placeholder shape so the rest of the pipeline can be built
-    and tested against it now."""
+    """What execution needs to place (paper) orders and size a position."""
     symbol: str
     lot_size: int
     bid: float
@@ -80,17 +90,72 @@ class ResolvedContract:
 async def _resolve_option_contract(
     fyers, direction: str, underlying_price: float, now_ist: datetime,
 ) -> Optional[ResolvedContract]:
-    """[STUB -- see module docstring's OPEN ITEM] Always returns None in
-    v1. Wire this up once real Fyers instrument/options-chain data has
-    been explored (rollout step 7): pick the nearest liquid strike near
-    ATM and the nearest tradeable expiry, build the Fyers option symbol,
-    and return a ResolvedContract from a fresh quote."""
-    logger.warning(
-        "tv_fyers_symbol_resolution_not_implemented direction=%s underlying=%.2f "
-        "-- no live Fyers instrument data available yet; signal cannot execute",
-        direction, underlying_price,
+    """Fetch the live Fyers options chain for NIFTY (nearest expiry by
+    default) and pick the strike nearest `underlying_price` for the
+    requested direction. Returns None (never fabricates a plausible-
+    looking contract) if the chain is unavailable or has no candidate
+    for that direction."""
+    chain = await fyers.get_option_chain(_UNDERLYING_INDEX_SYMBOL, strike_count=20)
+    if not chain or chain.get("s") != "ok":
+        logger.warning("tv_fyers_option_chain_unavailable direction=%s", direction)
+        return None
+
+    data = chain.get("data", {})
+    options = data.get("optionsChain", [])
+    expiry_data = data.get("expiryData", [])
+    if not options or not expiry_data:
+        logger.warning("tv_fyers_option_chain_empty direction=%s", direction)
+        return None
+
+    # The index's own entry in optionsChain (option_type=="") carries
+    # "fp" (forward/futures price) -- the correct Black-Scholes forward,
+    # not the spot. Degrade to spot rather than fail if it's absent.
+    forward = underlying_price
+    for row in options:
+        if row.get("option_type") == "" and row.get("fp"):
+            forward = float(row["fp"])
+            break
+
+    candidates = [
+        row for row in options
+        if row.get("option_type") == direction and row.get("strike_price", -1) > 0
+    ]
+    if not candidates:
+        logger.warning("tv_fyers_no_candidates_for_direction direction=%s", direction)
+        return None
+
+    best = min(candidates, key=lambda r: abs(r["strike_price"] - underlying_price))
+
+    bid = float(best.get("bid") or 0.0)
+    ask = float(best.get("ask") or 0.0)
+    ltp = float(best.get("ltp") or 0.0)
+    mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else ltp
+
+    # Nearest expiry's date, from the chain's own expiryData (avoids
+    # re-parsing the option symbol's date encoding, which differs
+    # between weekly and monthly contracts).
+    expiry_epoch = int(expiry_data[0]["expiry"])
+    expiry_date = datetime.fromtimestamp(expiry_epoch, tz=timezone.utc).astimezone(IST).date()
+
+    T = years_to_expiry(expiry_date, now_ist)
+    iv = None
+    if mid > 0 and forward > 0 and T > 0:
+        iv = implied_vol(
+            mid, forward, float(best["strike_price"]), T,
+            RISK_FREE_RATE, direction == "CE",
+        )
+
+    return ResolvedContract(
+        symbol=best["symbol"],
+        lot_size=_NIFTY_LOT_SIZE,
+        bid=bid, ask=ask,
+        oi=int(best.get("oi") or 0),
+        volume=int(best.get("volume") or 0),
+        iv=iv,
+        # Fetched synchronously moments before use; Fyers' chain response
+        # carries no per-quote timestamp to measure real staleness against.
+        quote_age_sec=0.0,
     )
-    return None
 
 
 async def _compute_rsi_and_atr(fyers, now_ist: datetime) -> tuple:
@@ -146,7 +211,7 @@ async def handle_tv_entry_signal(fyers, db_path: str, payload: dict) -> dict:
     # ---- RSI/ATR off the underlying index (needs no instrument dump) --
     rsi, atr = await _compute_rsi_and_atr(fyers, now_ist)
 
-    # ---- contract resolution (STUB -- see module docstring) -----------
+    # ---- contract resolution (real optionchain()-based lookup) --------
     contract = await _resolve_option_contract(
         fyers, signal.direction, signal.underlying_price, now_ist,
     )

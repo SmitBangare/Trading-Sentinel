@@ -17,20 +17,30 @@ places a real order regardless of what credentials you configure.
 
 CURRENT STATUS (read before doing anything else)
 --------------------------------------------------
-Everything is built and tested EXCEPT one piece: picking an actual
-tradeable Fyers option contract (strike + expiry) for an incoming
-signal. python-engine/tv_fyers_orchestrator.py's
-`_resolve_option_contract()` is a deliberate stub that always returns
-None — every real webhook signal will currently be logged and rejected
-with reason "symbol_resolution_unavailable" until this is wired up
-against real Fyers instrument/options-chain data (which needs a real
-Fyers account to explore). Everything else — signal intake, the
-RSI/IV/liquidity double-check gates, sizing, paper execution, and exit
-management — is fully built and tested against a synthetic contract.
+[UPDATED 2026-09-25] Fully wired end to end, including contract
+resolution. python-engine/tv_fyers_orchestrator.py's
+`_resolve_option_contract()` now calls Fyers' real optionchain()
+endpoint (confirmed live against a real account) to pick the strike
+nearest the signal's underlying_price and compute IV via Black-Scholes
+(Fyers' chain response carries no IV field). NIFTY's lot size (65,
+effective from the January 2026 NSE/SEBI revision) is a hardcoded
+constant, not fetched -- re-verify if NSE revises it again.
 
-You can complete every step below (including logging in to Fyers)
-without that piece existing; you just won't see a live paper trade
-appear yet.
+Still paper-only and triple-disarmed regardless -- see above.
+
+[VERIFIED 2026-09-25] Ran a genuine end-to-end qualification test against
+a real armed Fyers token: webhook -> ingest -> real optionchain() lookup
+-> RSI/IV/liquidity gate ladder -> `tv_fyers_entry_rejected
+reason=spread_too_wide`. No crash, no stub path -- a real gate correctly
+vetoed a real (too-wide, post-close) quote. This also caught and fixed a
+genuine bug: `init_tv_fyers_positions_db()` existed in
+tv_fyers_positions.py but was never called from main.py's lifespan, so
+the very first live signal failed with
+`sqlite3.OperationalError: no such table: tv_fyers_positions` before
+even reaching the gates. Fixed by adding the missing init call next to
+the existing `init_tv_fyers_signal_db()` call in main.py's lifespan.
+Re-run during market hours to observe a paper entry actually clear the
+gate ladder (post-close spreads are expected to be wide and get vetoed).
 
 
 ONE-TIME SETUP
@@ -118,12 +128,14 @@ Send a synthetic signal directly to confirm the wiring works:
         "signal_time": "<current UTC ISO-8601 timestamp>"
       }'
 
-Expect: {"received": true, "signal_id": "...", "forwarded": true}. Then
-check python-engine's logs for `tv_fyers_signal_ingested` and (today)
-`tv_fyers_symbol_resolution_not_implemented` — the latter confirms the
-signal reached the orchestrator and was correctly held back pending the
-contract-resolution piece above, rather than silently vanishing or
-fabricating a trade.
+Expect: {"received": true, "signal_id": "...", "forwarded": true}. With
+a Fyers token armed (see DAILY LOGIN above) and the market open, check
+python-engine's logs for `tv_fyers_signal_ingested` followed by either
+`tv_fyers_entry_submitted` (paper entry executed) or
+`tv_fyers_entry_rejected` (RSI/IV/liquidity veto blocked it) --
+both are correct outcomes; only `tv_fyers_option_chain_unavailable` or
+`tv_fyers_no_candidates_for_direction` indicate a real connectivity/data
+problem worth investigating.
 
 
 USEFUL LOG LINES TO GREP FOR
@@ -133,22 +145,21 @@ USEFUL LOG LINES TO GREP FOR
   tv_fyers_entry_submitted        — a paper entry was executed
   tv_fyers_position_closed        — a paper position was exited (with reason)
   tv_fyers_exit_tick_complete     — the 90s exit-management poll ran
-  tv_fyers_token_set              — Fyers access token armed
-  tv_fyers_symbol_resolution_not_implemented — expected until the contract-
-                                     resolution piece is built (see above)
+  tv_fyers_token_armed            — Fyers access token armed
+  tv_fyers_option_chain_unavailable  — Fyers optionchain() call failed
+  tv_fyers_no_candidates_for_direction — chain fetched OK but had no
+                                     CE/PE (whichever the signal wanted)
+                                     leg at all -- worth investigating
 
 
-NEXT STEP TO ACTUALLY SEE A PAPER TRADE
-------------------------------------------
-Once logged in with real Fyers credentials, explore Fyers' options-
-chain/instrument data (there is no bulk instrument-dump endpoint
-documented the way Kite has one — options chain quotes are fetched
-per-symbol) and wire up `_resolve_option_contract()` in
-python-engine/tv_fyers_orchestrator.py: pick a strike near
-`underlying_price` and the nearest tradeable expiry, construct the
-Fyers option symbol, and return a `ResolvedContract` from a fresh
-quote. Everything downstream (gates, sizing, paper execution, exit
-management) is already built and tested to receive it.
+OPS ENDPOINT: RAW OPTIONS CHAIN
+----------------------------------
+For debugging/exploring what Fyers is actually returning:
+
+    curl "http://localhost:8000/internal/tv-fyers/optionchain?symbol=NSE:NIFTY50-INDEX&strike_count=20" \
+      -H "X-Internal-Secret: <your INTERNAL_API_SECRET>"
+
+Needs a Fyers token armed (DAILY LOGIN above) to return real data.
 
 ================================================================
 END OF MANUAL

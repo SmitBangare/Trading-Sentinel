@@ -2019,9 +2019,12 @@ async def lifespan(app: FastAPI):
     # self-improvement loop. Idempotent.
     from analytics import init_analytics_db
     await init_analytics_db(settings.DB_PATH)
-    # [SMIT-FYERS-OPTIONS 2026-09-25] TradingView -> Fyers signal log. Idempotent.
+    # [SMIT-FYERS-OPTIONS 2026-09-25] TradingView -> Fyers signal log + position
+    # store. Idempotent.
     from tv_fyers_signal import init_tv_fyers_signal_db
     await init_tv_fyers_signal_db(settings.DB_PATH)
+    from tv_fyers_positions import init_tv_fyers_positions_db
+    await init_tv_fyers_positions_db(settings.DB_PATH)
     # [ROADMAP-2.8 2026-07-12] ops_liveness_daily / ops_funnel_daily.
     try:
         from ops_metrics import init_ops_metrics_db

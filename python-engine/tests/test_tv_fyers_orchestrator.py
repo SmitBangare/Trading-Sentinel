@@ -2,11 +2,15 @@
 Tests for tv_fyers_orchestrator.py -- entry (event-driven) and exit
 (polling) paths for the TradingView -> Fyers pipeline.
 
-Entry-path happy-path tests monkeypatch _resolve_option_contract (an
-explicit stub in v1, see the module's docstring) to return a synthetic
-ResolvedContract, so the rest of the pipeline -- staleness, RSI/ATR,
-double-check gates, sizing, paper execution, position persistence -- is
-exercised end-to-end without needing real Fyers instrument data.
+TestResolveOptionContract exercises the real optionchain()-based
+resolution logic against a realistic mocked response (shaped exactly
+like a real Fyers optionchain() response captured live on 2026-09-25).
+
+The rest of the entry-path tests (TestHandleTvEntrySignal) monkeypatch
+_resolve_option_contract to return a synthetic ResolvedContract, so the
+REST of the pipeline -- staleness, RSI/ATR, double-check gates, sizing,
+paper execution, position persistence -- is exercised in isolation from
+contract-resolution specifics.
 """
 from __future__ import annotations
 
@@ -52,9 +56,53 @@ def _mock_fyers_with_candles(n=40):
 
 def _good_contract():
     return orch.ResolvedContract(
-        symbol="NSE:NIFTY24SEP24500CE", lot_size=50, bid=119.5, ask=120.5,
+        symbol="NSE:NIFTY24SEP24500CE", lot_size=65, bid=119.5, ask=120.5,
         oi=10_000, volume=5_000, iv=0.20, quote_age_sec=5.0,
     )
+
+
+def _real_shaped_option_chain(underlying_ltp=23140.5, forward=23190.0):
+    """Shaped exactly like a real Fyers optionchain() response captured
+    live on 2026-09-25 (field names/nesting verified against a real
+    account, not guessed) -- trimmed to a few strikes either side of
+    the money for CE and PE."""
+    return {
+        "code": 200,
+        "s": "ok",
+        "data": {
+            "expiryData": [
+                {"date": "29-09-2026", "expiry": "1790676600", "expiry_flag": "M"},
+                {"date": "06-10-2026", "expiry": "1791281400", "expiry_flag": "W"},
+            ],
+            "optionsChain": [
+                {
+                    "symbol": "NSE:NIFTY50-INDEX", "ex_symbol": "NIFTY50-INDEX",
+                    "option_type": "", "strike_price": -1,
+                    "ltp": underlying_ltp, "fp": forward,
+                },
+                {
+                    "symbol": "NSE:NIFTY26SEP23100CE", "option_type": "CE",
+                    "strike_price": 23100, "bid": 149.05, "ask": 150.15,
+                    "ltp": 150.15, "oi": 9300265, "volume": 349838515,
+                },
+                {
+                    "symbol": "NSE:NIFTY26SEP23100PE", "option_type": "PE",
+                    "strike_price": 23100, "bid": 58.3, "ask": 58.85,
+                    "ltp": 58.3, "oi": 11453000, "volume": 467405770,
+                },
+                {
+                    "symbol": "NSE:NIFTY26SEP23150CE", "option_type": "CE",
+                    "strike_price": 23150, "bid": 118.75, "ask": 119.3,
+                    "ltp": 119.25, "oi": 3817255, "volume": 218096385,
+                },
+                {
+                    "symbol": "NSE:NIFTY26SEP23150PE", "option_type": "PE",
+                    "strike_price": 23150, "bid": 76.6, "ask": 77.15,
+                    "ltp": 76.75, "oi": 4174755, "volume": 177176675,
+                },
+            ],
+        },
+    }
 
 
 def _signal_payload(**overrides):
@@ -75,6 +123,75 @@ async def _init_dbs(db_path):
     await init_tv_fyers_positions_db(db_path)
 
 
+class TestResolveOptionContract:
+    @pytest.mark.asyncio
+    async def test_picks_nearest_strike_for_ce(self):
+        fyers = MagicMock()
+        fyers.get_option_chain = AsyncMock(return_value=_real_shaped_option_chain())
+        contract = await orch._resolve_option_contract(fyers, "CE", 23140.0, _ist(2026, 9, 25, 10, 0))
+        assert contract is not None
+        # 23140 is 40 away from 23100, 10 away from 23150 -> nearest is 23150.
+        assert contract.symbol == "NSE:NIFTY26SEP23150CE"
+        assert contract.lot_size == 65
+        assert contract.bid == 118.75
+        assert contract.ask == 119.3
+        assert contract.oi == 3817255
+
+    @pytest.mark.asyncio
+    async def test_picks_nearest_strike_for_pe(self):
+        fyers = MagicMock()
+        fyers.get_option_chain = AsyncMock(return_value=_real_shaped_option_chain())
+        contract = await orch._resolve_option_contract(fyers, "PE", 23105.0, _ist(2026, 9, 25, 10, 0))
+        assert contract is not None
+        assert contract.symbol == "NSE:NIFTY26SEP23100PE"
+
+    @pytest.mark.asyncio
+    async def test_computes_iv_via_black_scholes(self):
+        fyers = MagicMock()
+        fyers.get_option_chain = AsyncMock(return_value=_real_shaped_option_chain())
+        contract = await orch._resolve_option_contract(fyers, "CE", 23140.0, _ist(2026, 9, 25, 10, 0))
+        assert contract.iv is not None
+        # Sane band for a real short-dated NIFTY premium -- not a tight
+        # pin (the exact value depends on years-to-expiry at test time
+        # relative to the fixture's hardcoded 29-Sep-2026 expiry), just
+        # confirms the solver produced a real, plausible number rather
+        # than None or something wildly outside a realistic IV range.
+        assert 0.01 < contract.iv < 3.0
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_chain_call_fails(self):
+        fyers = MagicMock()
+        fyers.get_option_chain = AsyncMock(return_value={})
+        contract = await orch._resolve_option_contract(fyers, "CE", 23140.0, _ist(2026, 9, 25, 10, 0))
+        assert contract is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_chain_has_no_candidates_for_direction(self):
+        fyers = MagicMock()
+        chain = _real_shaped_option_chain()
+        # Strip every PE leg -- a CE-only chain should not fabricate a PE pick.
+        chain["data"]["optionsChain"] = [
+            r for r in chain["data"]["optionsChain"] if r.get("option_type") != "PE"
+        ]
+        fyers.get_option_chain = AsyncMock(return_value=chain)
+        contract = await orch._resolve_option_contract(fyers, "PE", 23140.0, _ist(2026, 9, 25, 10, 0))
+        assert contract is None
+
+    @pytest.mark.asyncio
+    async def test_degrades_to_spot_when_forward_missing(self):
+        """The index row's `fp` field is the correct Black-Scholes
+        forward; if it's ever absent, resolution should still produce a
+        contract (degraded to spot) rather than fail outright."""
+        fyers = MagicMock()
+        chain = _real_shaped_option_chain()
+        for row in chain["data"]["optionsChain"]:
+            if row.get("option_type") == "":
+                row.pop("fp", None)
+        fyers.get_option_chain = AsyncMock(return_value=chain)
+        contract = await orch._resolve_option_contract(fyers, "CE", 23140.0, _ist(2026, 9, 25, 10, 0))
+        assert contract is not None
+
+
 class TestHandleTvEntrySignal:
     @pytest.mark.asyncio
     async def test_stale_signal_is_rejected_without_executing(self, tmp_path):
@@ -90,12 +207,13 @@ class TestHandleTvEntrySignal:
         assert await open_positions(db_path, "TV_FYERS_PAPER") == []
 
     @pytest.mark.asyncio
-    async def test_symbol_resolution_stub_blocks_execution_by_default(self, tmp_path):
-        """Confirms the v1 stub behaves honestly: no contract resolver
-        wired up yet -> no trade, not a silent fabrication."""
+    async def test_chain_unavailable_blocks_execution_without_fabricating(self, tmp_path):
+        """When Fyers' options chain can't be fetched, no trade -- never
+        a silently fabricated contract."""
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
         fyers = _mock_fyers_with_candles()
+        fyers.get_option_chain = AsyncMock(return_value={})
         result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
         assert result["executed"] is False
         assert result["reason"] == "symbol_resolution_unavailable"
