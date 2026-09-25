@@ -18,6 +18,12 @@ const configSchema = z.object({
   
   SESSION_SECRET: z.string().min(32),
   INTERNAL_API_SECRET: z.string().min(32),
+  // [SMIT-FYERS-OPTIONS 2026-09-25] Dashboard login no longer requires
+  // completing Zerodha OAuth (the TV->Fyers pipeline never uses Zerodha,
+  // and Zerodha broker credentials may not even be configured). This one
+  // shared password unlocks the same req.session.authenticated flag that
+  // Zerodha login used to set -- see routes/auth.js's new /password-login.
+  DASHBOARD_PASSWORD: z.string().min(8),
   OPENCLAW_WEBHOOK_SECRET: z.string().min(32),
   // Shared secret TradingView embeds in its Pine Script alert body (TradingView
   // webhook alerts cannot set custom headers or sign requests, so a body-field

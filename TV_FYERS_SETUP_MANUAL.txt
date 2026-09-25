@@ -42,6 +42,78 @@ the existing `init_tv_fyers_signal_db()` call in main.py's lifespan.
 Re-run during market hours to observe a paper entry actually clear the
 gate ladder (post-close spreads are expected to be wide and get vetoed).
 
+[CHANGED 2026-09-25] Two further changes made after user feedback:
+
+1. DASHBOARD LOGIN NO LONGER NEEDS ZERODHA. The dashboard's login used to
+   equate "completed Zerodha OAuth" with "allowed to view the dashboard" --
+   a historical accident, not a requirement of this pipeline (this
+   pipeline never uses Zerodha). The dashboard now unlocks with a simple
+   shared password instead: set DASHBOARD_PASSWORD in
+   node-gateway/server/.env, then log in at http://localhost:3000 with
+   that password. Zerodha OAuth is still available as an optional
+   secondary link on the login page, unrelated to this pipeline.
+
+2. THE RSI VETO WAS REPLACED WITH AN AI CANDLE-TREND GATE. TradingView
+   still only supplies a direction (CE/PE); previously a mechanical
+   RSI-threshold check double-checked it. Now Claude reads the recent
+   NIFTY 5-minute candles directly and decides PASS/REJECT itself --
+   see python-engine/tv_fyers_ai_gate.py. IV and liquidity checks
+   (stale quote / thin OI / thin volume / one-sided market / wide spread)
+   remain deterministic math, unchanged -- only the directional-momentum
+   judgment moved to AI. Set TV_FYERS_ANTHROPIC_API_KEY in
+   python-engine/.env to arm it; left blank, the gate FAILS CLOSED
+   (every signal is rejected with reason=ai_unavailable_no_key) rather
+   than silently letting trades through unchecked. AI-driven outcomes are
+   always prefixed `ai_` (ai_pass_*, ai_reject_*, ai_unavailable_*,
+   ai_malformed_response) so they're never confused with a deterministic
+   gate's reason in logs or on the dashboard.
+   [NOTE] This is a deliberate, scoped exception to this codebase's usual
+   rule that AI never gates a trade (see optional_ai_status.py's
+   "EXECUTION AUTHORITY: NONE" system for the general rule) -- made only
+   for this paper-only pipeline, at the user's explicit request.
+
+[CHANGED 2026-09-25, ROUND 2] Two more additions after further user feedback:
+
+3. FULL AI TRADE PLANNER -- a second, independent entry path, no
+   TradingView alert needed at all. python-engine/scheduler_setup.py
+   registers a new job (tv_ai_scan_tick, default every 300s = 5 min,
+   TV_FYERS_AI_SCAN_INTERVAL_SEC) that calls
+   tv_fyers_orchestrator.handle_ai_candle_scan(): fetches recent NIFTY
+   candles straight from Fyers, then asks Claude
+   (tv_fyers_ai_gate.analyze_and_plan_trade) to decide the WHOLE trade
+   itself -- direction (CE/PE), stop-loss and target, all as underlying
+   index price levels -- or NO_TRADE. Money-risk sizing and the
+   deterministic IV/liquidity gates still run afterward, unchanged, on
+   whatever contract the AI's direction resolves to -- the AI decides the
+   trade IDEA, deterministic math still guards whether it's
+   affordable/tradeable. Every scan tick (including NO_TRADE) is
+   persisted to tv_fyers_signals with strategy="ai_candle_scan", so the
+   dashboard's "Recent signals" table becomes a live feed of what the AI
+   saw and decided every 5 minutes, not just the trades it took.
+   Governed by the same TV_FYERS_DISABLE_PAPER kill switch as every other
+   entry path -- no separate disarm flag.
+
+   The original TradingView webhook path (handle_tv_entry_signal) is
+   UNCHANGED and still active as an optional manual/backup trigger --
+   kept deliberately, at the user's request, alongside the automatic
+   scanner. Clarification worth recording: TradingView's charts were
+   NEVER the bot's candle source -- the bot has always fetched its own
+   NIFTY candles directly from Fyers (fyers.get_historical), completely
+   independently of TradingView. TradingView's only role, in either
+   path, is that one optional webhook alert message; it was never a data
+   connection.
+
+4. REAL-TIME TELEGRAM ALERTS on every paper entry and exit (both entry
+   paths). Uses operator_alert.notify_operator() -- the one alert helper
+   this codebase already trusts not to fail silently (see that module's
+   own docstring). A failed/undeliverable alert is logged loudly
+   (tv_fyers_entry_alert_failed / tv_fyers_exit_alert_failed) but never
+   blocks or unwinds the trade itself. Needs a real TELEGRAM_BOT_TOKEN +
+   TELEGRAM_CHAT_ID in node-gateway/server/.env to actually deliver (both
+   are still placeholder values in this checkout, same as the rest of
+   this pipeline's optional credentials) -- until then these alerts are
+   attempted, fail, and get logged, exactly as designed.
+
 
 ONE-TIME SETUP
 --------------
@@ -132,17 +204,19 @@ Expect: {"received": true, "signal_id": "...", "forwarded": true}. With
 a Fyers token armed (see DAILY LOGIN above) and the market open, check
 python-engine's logs for `tv_fyers_signal_ingested` followed by either
 `tv_fyers_entry_submitted` (paper entry executed) or
-`tv_fyers_entry_rejected` (RSI/IV/liquidity veto blocked it) --
-both are correct outcomes; only `tv_fyers_option_chain_unavailable` or
-`tv_fyers_no_candidates_for_direction` indicate a real connectivity/data
+`tv_fyers_entry_rejected` (IV/liquidity veto or the AI candle-trend gate
+blocked it -- reason=ai_reject_* means Claude said no, reason=ai_unavailable_*
+means the AI gate itself failed closed, e.g. no TV_FYERS_ANTHROPIC_API_KEY
+configured) -- all are correct outcomes; only `tv_fyers_option_chain_unavailable`
+or `tv_fyers_no_candidates_for_direction` indicate a real connectivity/data
 problem worth investigating.
 
 
 USEFUL LOG LINES TO GREP FOR
 ------------------------------
   tv_fyers_signal_ingested        — a webhook signal was received + persisted
-  tv_fyers_entry_rejected         — RSI/IV/liquidity veto blocked an entry
-  tv_fyers_entry_submitted        — a paper entry was executed
+  tv_fyers_entry_rejected         — IV/liquidity veto or the AI gate blocked an entry
+  tv_fyers_entry_submitted        — a paper entry was executed (TradingView-triggered)
   tv_fyers_position_closed        — a paper position was exited (with reason)
   tv_fyers_exit_tick_complete     — the 90s exit-management poll ran
   tv_fyers_token_armed            — Fyers access token armed
@@ -150,6 +224,13 @@ USEFUL LOG LINES TO GREP FOR
   tv_fyers_no_candidates_for_direction — chain fetched OK but had no
                                      CE/PE (whichever the signal wanted)
                                      leg at all -- worth investigating
+  tv_ai_scan_plan / tv_ai_scan_no_trade — the AI's decision on one scan tick
+  tv_ai_scan_entry_submitted      — a paper entry was executed (AI-scan-triggered)
+  tv_ai_scan_entry_rejected       — AI proposed a trade, IV/liquidity vetoed it
+  tv_ai_scan_tick_complete        — the 5-min autonomous scan tick ran
+  tv_fyers_entry_alert_failed / tv_fyers_exit_alert_failed — a Telegram
+                                     page couldn't be delivered (trade itself
+                                     still went through -- see operator_alert.py)
 
 
 OPS ENDPOINT: RAW OPTIONS CHAIN

@@ -37,6 +37,22 @@ export const evidenceFixtures = {
     detail: { queue: { pending: 0, cached: 0, daily_requests: 3, daily_budget: 40, max_pending: 16, circuit_state: 'OPEN' } },
     note: 'DEV EVIDENCE FIXTURE — provider outage leaves deterministic processing independent.',
   },
+  tvFyersStatus: {
+    fyers_token_armed: true, open_paper_positions: 1, live_trading_enabled: false,
+  },
+  tvFyersSignals: {
+    signals: [
+      { signal_id: 'demo-1', symbol: 'NIFTY', direction: 'CE', underlying_price: 24512.3, strategy: 'orb_momentum_v1', signal_time: '2026-09-25T04:16:00Z', received_at: '2026-09-25T04:16:00Z', handled: 1, handled_result: 'executed' },
+      { signal_id: 'demo-2', symbol: 'NIFTY', direction: 'PE', underlying_price: 24488.1, strategy: 'orb_momentum_v1', signal_time: '2026-09-25T05:02:00Z', received_at: '2026-09-25T05:02:00Z', handled: 1, handled_result: 'spread_too_wide' },
+      { signal_id: 'demo-3', symbol: 'NIFTY', direction: 'CE', underlying_price: 24530.0, strategy: 'orb_momentum_v1', signal_time: '2026-09-25T06:47:00Z', received_at: '2026-09-25T06:47:00Z', handled: 1, handled_result: 'rsi_overbought' },
+    ],
+  },
+  tvFyersPositions: {
+    positions: [
+      { id: 2, source: 'TV_FYERS_PAPER', signal_id: 'demo-1', symbol: 'NSE:NIFTY26SEP24500CE', direction: 'CE', qty: 65, entry_time: '2026-09-25T04:16:05Z', entry_premium: 142.5, entry_underlying: 24512.3, stop_underlying: 24462.3, target_underlying: 24602.3, premium_stop: 106.9, trail_active: 1, trail_stop_underlying: 24540.0, best_underlying: 24575.0, atr_at_entry: 50.0, status: 'OPEN', entry_order_id: 'PAPER-2' },
+      { id: 1, source: 'TV_FYERS_PAPER', signal_id: 'demo-0', symbol: 'NSE:NIFTY26SEP24400PE', direction: 'PE', qty: 65, entry_time: '2026-09-25T03:20:00Z', entry_premium: 98.0, entry_underlying: 24450.0, stop_underlying: 24500.0, target_underlying: 24350.0, premium_stop: 73.5, trail_active: 0, trail_stop_underlying: null, best_underlying: 24450.0, atr_at_entry: 45.0, status: 'CLOSED', entry_order_id: 'PAPER-1', exit_time: '2026-09-25T03:55:00Z', exit_premium: 121.0, exit_underlying: 24398.0, exit_reason: 'target_hit', gross_pnl: 1495.0, costs: 40.0, pnl: 1455.0, r_multiple: 1.8, exit_order_id: 'PAPER-1-X' },
+    ],
+  },
   sessionDiagnostics: {
     mode: 'OBSERVATION_ONLY', session_count: 5, can_place_orders: false, authorization_effect: 'NONE', findings: [],
     reports: [{

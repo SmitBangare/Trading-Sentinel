@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const router = express.Router();
 const kite = require('../services/kite');
@@ -7,6 +8,25 @@ const { logger } = require('../middleware/logger');
 const { requireSession } = require('../middleware/auth');
 const { limiters } = require('../middleware/security');
 const { withRetry } = require('../utils/retry');
+
+// [SMIT-FYERS-OPTIONS 2026-09-25] Dashboard login without Zerodha. Sets the
+// exact same req.session.authenticated flag the Zerodha callback below
+// sets, so requireSession/proxy.js/everything downstream is unchanged --
+// this is just a second way to reach that same flag, not a new auth model.
+router.post('/password-login', limiters.authLogin, (req, res) => {
+  const { password } = req.body || {};
+  const expected = Buffer.from(config.DASHBOARD_PASSWORD);
+  const supplied = Buffer.from(String(password || ''));
+  const match = expected.length === supplied.length && crypto.timingSafeEqual(expected, supplied);
+  if (!match) {
+    logger.warn({ event_type: 'dashboard_password_login_failed' }, 'Dashboard password login failed');
+    return res.status(401).json({ success: false, message: 'Incorrect password' });
+  }
+  req.session.authenticated = true;
+  req.session.login_time = new Date().toISOString();
+  logger.info({ event_type: 'dashboard_password_login_success' }, 'Dashboard password login succeeded');
+  res.json({ success: true });
+});
 
 // Generate Zerodha login URL
 router.get('/login', limiters.authLogin, (req, res) => {

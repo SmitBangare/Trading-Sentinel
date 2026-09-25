@@ -102,6 +102,21 @@ async def ingest_tv_signal(db_path: str, payload: dict) -> dict:
     return {"received": True, "signal_id": signal.signal_id}
 
 
+async def list_signals(db_path: str, limit: int = 50) -> list[dict]:
+    """Newest-first read of the signal log, for the dashboard panel.
+    Read-only, never called from the webhook/ingest path."""
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT signal_id, symbol, direction, underlying_price, strategy, "
+            "signal_time, received_at, handled, handled_result "
+            "FROM tv_fyers_signals ORDER BY received_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 async def mark_signal_handled(db_path: str, signal_id: str, result: str) -> None:
     """Record the orchestrator's outcome for a signal (wired in rollout
     step 5, once tv_fyers_orchestrator.py exists). Kept here now so the

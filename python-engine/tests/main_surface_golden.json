@@ -465,11 +465,35 @@
       "response_model": null
     },
     {
+      "endpoint": "get_tv_fyers_positions_route",
+      "methods": [
+        "GET"
+      ],
+      "path": "/internal/tv-fyers/positions",
+      "response_model": null
+    },
+    {
       "endpoint": "post_tv_fyers_signal",
       "methods": [
         "POST"
       ],
       "path": "/internal/tv-fyers/signal",
+      "response_model": null
+    },
+    {
+      "endpoint": "get_tv_fyers_signals",
+      "methods": [
+        "GET"
+      ],
+      "path": "/internal/tv-fyers/signals",
+      "response_model": null
+    },
+    {
+      "endpoint": "get_tv_fyers_status",
+      "methods": [
+        "GET"
+      ],
+      "path": "/internal/tv-fyers/status",
       "response_model": null
     },
     {

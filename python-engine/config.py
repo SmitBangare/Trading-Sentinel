@@ -1577,6 +1577,28 @@ class Settings(BaseSettings):
     TV_FYERS_IV_SANITY_MIN:       float = 0.05
     TV_FYERS_IV_SANITY_MAX:       float = 1.00
 
+    # [SMIT-FYERS-OPTIONS-AI 2026-09-25] Candle-trend double-check now asks
+    # Claude to read the recent NIFTY candles and judge whether they
+    # support the TradingView alert's proposed direction, replacing the
+    # old mechanical RSI-threshold veto (rsi_veto in tv_fyers_gates.py was
+    # removed; see tv_fyers_ai_gate.py). IV/liquidity/signal-freshness
+    # stay deterministic on purpose -- only the directional-momentum
+    # judgment call is now AI-driven, and only for this paper-only
+    # pipeline. Empty key => the AI gate fails closed (ai_unavailable_no_key),
+    # same fail-closed posture every other veto here already has.
+    TV_FYERS_ANTHROPIC_API_KEY:   str   = ""
+    TV_FYERS_AI_MODEL:            str   = "claude-sonnet-5"
+    TV_FYERS_AI_TIMEOUT_SEC:      float = 15.0
+    TV_FYERS_AI_MAX_CANDLES:      int   = 30
+
+    # [AI-SCAN 2026-09-25] Autonomous candle-scan entry path (no
+    # TradingView alert -- see tv_fyers_orchestrator.handle_ai_candle_scan).
+    # 300s matches the 5-minute candle resolution the AI actually reads;
+    # scanning faster would mostly re-show the same not-yet-closed candle.
+    # Governed by the SAME TV_FYERS_DISABLE_PAPER kill switch as every
+    # other entry path here -- no separate disarm flag needed.
+    TV_FYERS_AI_SCAN_INTERVAL_SEC: int  = 300
+
     TV_FYERS_MIN_OI:              int   = 5000
     TV_FYERS_MIN_VOL:             int   = 1000
     TV_FYERS_MAX_SPREAD_PCT:      float = 0.015

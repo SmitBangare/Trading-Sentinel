@@ -28,7 +28,8 @@ from pydantic import ValidationError
 
 import main as _main
 from config import settings
-from tv_fyers_signal import ingest_tv_signal
+from tv_fyers_signal import ingest_tv_signal, list_signals
+import tv_fyers_positions as tv_positions
 from token_lifecycle import TokenPayload
 import structlog
 
@@ -67,6 +68,41 @@ async def get_tv_fyers_option_chain(
     exposing it as a route makes it inspectable without a one-off script."""
     _main._check_internal_secret(request, "get_tv_fyers_option_chain")
     return await _main.fyers.get_option_chain(symbol, strike_count=strike_count)
+
+
+@router.get("/internal/tv-fyers/status")
+async def get_tv_fyers_status(request: Request):
+    """Dashboard read: is the Fyers client actually armed right now, and
+    how many paper positions are open. Reads FyersClient.access_token
+    directly (the thing execution actually checks) rather than
+    node-gateway's session-scoped auth-status flag, which only reflects
+    the browser session that completed OAuth, not engine state."""
+    _main._check_internal_secret(request, "get_tv_fyers_status")
+    armed = bool(getattr(_main.fyers, "access_token", "") or "")
+    open_paper = await tv_positions.open_positions(settings.DB_PATH, "TV_FYERS_PAPER")
+    return {
+        "fyers_token_armed": armed,
+        "open_paper_positions": len(open_paper),
+        "live_trading_enabled": settings.TV_FYERS_LIVE_TRADING,
+    }
+
+
+@router.get("/internal/tv-fyers/signals")
+async def get_tv_fyers_signals(request: Request, limit: int = 50):
+    """Dashboard read: newest-first TradingView signal log."""
+    _main._check_internal_secret(request, "get_tv_fyers_signals")
+    rows = await list_signals(settings.DB_PATH, limit=limit)
+    return {"signals": rows}
+
+
+@router.get("/internal/tv-fyers/positions")
+async def get_tv_fyers_positions_route(request: Request, status: str = "ALL", limit: int = 100):
+    """Dashboard read: paper position history (open + closed)."""
+    _main._check_internal_secret(request, "get_tv_fyers_positions_route")
+    rows = await tv_positions.list_positions(
+        settings.DB_PATH, status=None if status == "ALL" else status, limit=limit,
+    )
+    return {"positions": rows}
 
 
 @router.post("/internal/tv-fyers/signal")

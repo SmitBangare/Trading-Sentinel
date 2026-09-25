@@ -96,6 +96,13 @@ router.get('/partner/advisory/research-readiness', (req, res) =>
 router.put('/partner/advisory/profile', (req, res) =>
   proxyToEngine(req, res, withQuery('/partner/advisory/profile', req.query), 'PUT'));
 
+// [SMIT-FYERS-OPTIONS 2026-09-25] TradingView -> Fyers dashboard panel reads.
+router.get('/tv-fyers/status', (req, res) => proxyToEngine(req, res, '/internal/tv-fyers/status'));
+router.get('/tv-fyers/signals', (req, res) =>
+  proxyToEngine(req, res, withQuery('/internal/tv-fyers/signals', req.query)));
+router.get('/tv-fyers/positions', (req, res) =>
+  proxyToEngine(req, res, withQuery('/internal/tv-fyers/positions', req.query)));
+
 // Backtest Lab submits background work, so requests never hold an HTTP socket
 // for the duration of a replay. The longer budget protects SQLite contention
 // and larger persisted result reads without weakening timeouts globally.

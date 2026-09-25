@@ -123,6 +123,40 @@ async def open_positions(db_path: str, source: str) -> List[TvFyersPosition]:
     return [_row_to_position(r) for r in rows]
 
 
+_ALL_COLUMNS = _SELECT_COLUMNS + (
+    ", exit_time, exit_premium, exit_underlying, exit_reason, "
+    "gross_pnl, costs, pnl, r_multiple, exit_order_id"
+)
+
+
+async def list_positions(
+    db_path: str, source: Optional[str] = None,
+    status: Optional[str] = None, limit: int = 100,
+) -> List[dict]:
+    """Newest-first read of the position store (open + closed, all
+    columns including exit/P&L fields), for the dashboard panel.
+    Read-only, never called from the entry/exit execution path."""
+    where = []
+    params: list = []
+    if source:
+        where.append("source = ?")
+        params.append(source)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    params.append(limit)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            f"SELECT {_ALL_COLUMNS} FROM tv_fyers_positions {clause} "
+            "ORDER BY id DESC LIMIT ?",
+            params,
+        )
+        rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 async def insert_position(db_path: str, **fields) -> int:
     async with aiosqlite.connect(db_path) as db:
         cur = await db.execute(

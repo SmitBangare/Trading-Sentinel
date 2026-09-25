@@ -1243,15 +1243,21 @@ def register_partner_scheduler_jobs(scheduler):
 # ---------------------------------------------------------------------------
 
 def register_tv_fyers_scheduler_jobs(scheduler):
-    """Register the exit-management polling job.
+    """Register the exit-management polling job, plus the autonomous
+    AI candle-scan entry job [ADDED 2026-09-25].
 
-    Only ONE job here, unlike fno_tick: entries are event-driven (one
-    TradingView webhook = one handle_tv_entry_signal call, dispatched
-    directly from routes_tv_fyers.py, not from a scheduler tick). Exits
-    need continuous price monitoring regardless of webhook timing, so
-    run_tv_fyers_exit_tick runs on its own interval -- mirrors fno_tick's
-    registration shape (telemetry_job, market-hours self-gate, token
-    guard) but against `_main.fyers` instead of `_main.kite`.
+    tv_fyers_exit_tick: TradingView-triggered entries are event-driven
+    (one webhook = one handle_tv_entry_signal call, dispatched directly
+    from routes_tv_fyers.py, not from a scheduler tick), but exits need
+    continuous price monitoring regardless of webhook timing, so this
+    runs on its own interval -- mirrors fno_tick's registration shape
+    (telemetry_job, market-hours self-gate, token guard) but against
+    `_main.fyers` instead of `_main.kite`.
+
+    tv_ai_scan_tick: the autonomous entry path -- no TradingView alert at
+    all. Claude reads recent candles on this interval and decides the
+    whole trade itself; see tv_fyers_orchestrator.handle_ai_candle_scan
+    and tv_fyers_ai_gate.py's "FULL PLANNER" docstring section.
     """
     import main as _main
     from scheduler_telemetry import telemetry_job
@@ -1310,4 +1316,52 @@ def register_tv_fyers_scheduler_jobs(scheduler):
     logger.info(
         "tv_fyers_cron_registered id=tv_fyers_exit_tick interval=%ds max_instances=1 coalesce=True",
         settings.TV_FYERS_SCAN_INTERVAL_SEC,
+    )
+
+    # [AI-SCAN 2026-09-25] Autonomous candle-scan entry path -- no
+    # TradingView alert involved. Same registration shape as the exit
+    # tick above (telemetry_job, market-hours self-gate, calendar gate,
+    # token guard), against tv_fyers_orchestrator.handle_ai_candle_scan.
+    @telemetry_job(settings.DB_PATH, "tv_ai_scan_tick")
+    async def _run_tv_ai_scan_tick_safe():
+        from tv_fyers_orchestrator import handle_ai_candle_scan
+        now_ist = datetime.now(IST)
+        nm = now_ist.hour * 60 + now_ist.minute
+        if not (9 * 60 + 15 <= nm <= 15 * 60 + 25):
+            return
+        today = now_ist.date()
+        if not await _main.is_trading_day(today, settings.DB_PATH):
+            return
+        if settings.TV_FYERS_DISABLE_PAPER:
+            return
+        if not _main.fyers.access_token:
+            return
+        started = monotonic()
+        outcome = "ok"
+        try:
+            result = await handle_ai_candle_scan(_main.fyers, settings.DB_PATH, now_ist)
+        except Exception as exc:
+            outcome = "failed"
+            result = {}
+            logger.error("tv_ai_scan_tick_failed err=%s", exc, exc_info=True)
+        finally:
+            elapsed = monotonic() - started
+            logger.info(
+                "tv_ai_scan_tick_complete outcome=%s elapsed_sec=%.3f executed=%s reason=%s",
+                outcome, elapsed, result.get("executed"), result.get("reason"),
+            )
+        return {
+            "status": "FAILED" if outcome == "failed" else "COMPLETED",
+            "reason": "tv_ai_scan_tick_exception" if outcome == "failed" else "none",
+        }
+
+    scheduler.add_job(
+        _run_tv_ai_scan_tick_safe, "interval",
+        seconds=settings.TV_FYERS_AI_SCAN_INTERVAL_SEC,
+        id="tv_ai_scan_tick",
+        max_instances=1, coalesce=True, misfire_grace_time=120,
+    )
+    logger.info(
+        "tv_fyers_cron_registered id=tv_ai_scan_tick interval=%ds max_instances=1 coalesce=True",
+        settings.TV_FYERS_AI_SCAN_INTERVAL_SEC,
     )

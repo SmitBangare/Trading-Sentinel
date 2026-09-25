@@ -15,7 +15,7 @@ contract-resolution specifics.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytz
@@ -224,9 +224,13 @@ class TestHandleTvEntrySignal:
         await _init_dbs(db_path)
         fyers = _mock_fyers_with_candles()
         monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
+        monkeypatch.setattr(orch, "evaluate_trend_with_ai", AsyncMock(return_value=(True, "ai_pass_test_stub")))
 
-        result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
         assert result["executed"] is True, result["reason"]
+        mock_notify.assert_awaited_once()
+        assert "tv_fyers_entry_alert" == mock_notify.call_args.kwargs.get("event")
 
         open_now = await open_positions(db_path, "TV_FYERS_PAPER")
         assert len(open_now) == 1
@@ -236,6 +240,23 @@ class TestHandleTvEntrySignal:
         assert pos.direction == "CE"
         assert pos.stop_underlying < pos.entry_underlying  # CE stop below entry
         assert pos.target_underlying > pos.entry_underlying
+
+    @pytest.mark.asyncio
+    async def test_alert_delivery_failure_never_blocks_the_trade(self, tmp_path, monkeypatch):
+        """operator_alert.notify_operator's whole contract is "never raises"
+        -- this proves the entry path doesn't depend on that contract
+        holding: even if it somehow raised, the trade must already be
+        recorded before the alert is even attempted."""
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        fyers = _mock_fyers_with_candles()
+        monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
+        monkeypatch.setattr(orch, "evaluate_trend_with_ai", AsyncMock(return_value=(True, "ai_pass_test_stub")))
+
+        with patch("operator_alert.notify_operator", AsyncMock(side_effect=RuntimeError("telegram down"))):
+            result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
+        assert result["executed"] is True, result["reason"]
+        assert len(await open_positions(db_path, "TV_FYERS_PAPER")) == 1
 
     @pytest.mark.asyncio
     async def test_gate_rejection_blocks_execution(self, tmp_path, monkeypatch):
@@ -255,6 +276,35 @@ class TestHandleTvEntrySignal:
         assert await open_positions(db_path, "TV_FYERS_PAPER") == []
 
     @pytest.mark.asyncio
+    async def test_ai_gate_fails_closed_by_default(self, tmp_path, monkeypatch):
+        """No ANTHROPIC key configured in test settings -- a signal that
+        clears every deterministic gate must still be rejected, not
+        silently executed. Fail-closed is the whole safety point of
+        tv_fyers_ai_gate.py; this is the regression test for it."""
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        fyers = _mock_fyers_with_candles()
+        monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
+
+        result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
+        assert result["executed"] is False
+        assert result["reason"] == "ai_unavailable_no_key"
+        assert await open_positions(db_path, "TV_FYERS_PAPER") == []
+
+    @pytest.mark.asyncio
+    async def test_ai_gate_rejection_blocks_execution(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        fyers = _mock_fyers_with_candles()
+        monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
+        monkeypatch.setattr(orch, "evaluate_trend_with_ai", AsyncMock(return_value=(False, "ai_reject_choppy_no_clear_trend")))
+
+        result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
+        assert result["executed"] is False
+        assert result["reason"] == "ai_reject_choppy_no_clear_trend"
+        assert await open_positions(db_path, "TV_FYERS_PAPER") == []
+
+    @pytest.mark.asyncio
     async def test_concurrency_cap_blocks_execution(self, tmp_path, monkeypatch):
         db_path = str(tmp_path / "orch.db")
         await _init_dbs(db_path)
@@ -270,6 +320,113 @@ class TestHandleTvEntrySignal:
         fyers = _mock_fyers_with_candles()
         monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
         result = await orch.handle_tv_entry_signal(fyers, db_path, _signal_payload())
+        assert result["executed"] is False
+        assert result["reason"] == "concurrency_cap"
+
+
+class TestHandleAiCandleScan:
+    """The autonomous entry path -- no TradingView alert at all. Every
+    tick, including NO_TRADE, must persist a tv_fyers_signals row (the
+    dashboard's whole point is showing what the AI saw and decided)."""
+
+    @pytest.mark.asyncio
+    async def test_no_trade_decision_persists_signal_without_executing(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        fyers = _mock_fyers_with_candles()
+        monkeypatch.setattr(orch, "analyze_and_plan_trade", AsyncMock(return_value=(None, "ai_no_trade_choppy")))
+
+        result = await orch.handle_ai_candle_scan(fyers, db_path, _ist(2026, 9, 25, 10, 0))
+        assert result["executed"] is False
+        assert result["reason"] == "ai_no_trade_choppy"
+        assert result["signal_id"] is not None
+        assert await open_positions(db_path, "TV_FYERS_PAPER") == []
+
+    @pytest.mark.asyncio
+    async def test_paper_disabled_short_circuits_before_any_ai_call(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_DISABLE_PAPER", True)
+        fyers = _mock_fyers_with_candles()
+        ai_mock = AsyncMock()
+        monkeypatch.setattr(orch, "analyze_and_plan_trade", ai_mock)
+
+        result = await orch.handle_ai_candle_scan(fyers, db_path, _ist(2026, 9, 25, 10, 0))
+        assert result["executed"] is False
+        assert result["reason"] == "paper_disabled"
+        ai_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_happy_path_executes_and_persists_position(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        fyers = _mock_fyers_with_candles()
+        plan = orch.AiTradePlan(
+            direction="CE", stop_underlying=24400.0, target_underlying=24700.0,
+            reason="strong_uptrend", confidence=0.85,
+        )
+        monkeypatch.setattr(orch, "analyze_and_plan_trade", AsyncMock(return_value=(plan, "ai_plan_strong_uptrend")))
+        monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
+
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            result = await orch.handle_ai_candle_scan(fyers, db_path, _ist(2026, 9, 25, 10, 0))
+        assert result["executed"] is True, result["reason"]
+        mock_notify.assert_awaited_once()
+
+        open_now = await open_positions(db_path, "TV_FYERS_PAPER")
+        assert len(open_now) == 1
+        pos = open_now[0]
+        assert pos.direction == "CE"
+        assert pos.stop_underlying == 24400.0
+        assert pos.target_underlying == 24700.0
+        assert pos.signal_id == result["signal_id"]
+
+    @pytest.mark.asyncio
+    async def test_deterministic_gate_still_blocks_an_ai_proposed_trade(self, tmp_path, monkeypatch):
+        """The AI deciding to trade is not enough -- IV/liquidity still
+        has to check out, exactly like the TradingView-triggered path."""
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        fyers = _mock_fyers_with_candles()
+        plan = orch.AiTradePlan(
+            direction="CE", stop_underlying=24400.0, target_underlying=24700.0,
+            reason="strong_uptrend", confidence=0.85,
+        )
+        monkeypatch.setattr(orch, "analyze_and_plan_trade", AsyncMock(return_value=(plan, "ai_plan_strong_uptrend")))
+        thin_contract = orch.ResolvedContract(
+            symbol="NSE:NIFTY24SEP24500CE", lot_size=65, bid=119.5, ask=120.5,
+            oi=10, volume=5, iv=0.20, quote_age_sec=5.0,
+        )
+        monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=thin_contract))
+
+        result = await orch.handle_ai_candle_scan(fyers, db_path, _ist(2026, 9, 25, 10, 0))
+        assert result["executed"] is False
+        assert result["reason"] == "oi_too_thin"
+        assert await open_positions(db_path, "TV_FYERS_PAPER") == []
+
+    @pytest.mark.asyncio
+    async def test_concurrency_cap_blocks_ai_proposed_trade(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "orch.db")
+        await _init_dbs(db_path)
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_MAX_CONCURRENT", 1)
+        await insert_position(
+            db_path, source="TV_FYERS_PAPER", signal_id="prior", symbol="NSE:NIFTY24SEP24000CE",
+            direction="CE", qty=50, entry_time=datetime.now().isoformat(),
+            entry_premium=100.0, entry_underlying=24000.0, stop_underlying=23900.0,
+            target_underlying=24200.0, premium_stop=75.0, best_underlying=24000.0,
+            atr_at_entry=50.0,
+        )
+        fyers = _mock_fyers_with_candles()
+        plan = orch.AiTradePlan(
+            direction="CE", stop_underlying=24400.0, target_underlying=24700.0,
+            reason="strong_uptrend", confidence=0.85,
+        )
+        monkeypatch.setattr(orch, "analyze_and_plan_trade", AsyncMock(return_value=(plan, "ai_plan_strong_uptrend")))
+        monkeypatch.setattr(orch, "_resolve_option_contract", AsyncMock(return_value=_good_contract()))
+
+        result = await orch.handle_ai_candle_scan(fyers, db_path, _ist(2026, 9, 25, 10, 0))
         assert result["executed"] is False
         assert result["reason"] == "concurrency_cap"
 
@@ -309,11 +466,14 @@ class TestRunTvFyersExitTick:
         fyers.get_quote = AsyncMock(side_effect=_quote)
         fyers.place_order = AsyncMock()  # must never be called (paper mode)
 
-        out = await orch.run_tv_fyers_exit_tick(fyers, db_path, _ist(2026, 9, 25, 10, 0))
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            out = await orch.run_tv_fyers_exit_tick(fyers, db_path, _ist(2026, 9, 25, 10, 0))
         assert len(out["exits"]) == 1
         assert out["exits"][0]["reason"] == "underlying_stop"
         assert await open_positions(db_path, "TV_FYERS_PAPER") == []
         fyers.place_order.assert_not_called()
+        mock_notify.assert_awaited_once()
+        assert mock_notify.call_args.kwargs.get("event") == "tv_fyers_exit_alert"
 
     @pytest.mark.asyncio
     async def test_target_arms_trail_without_exiting_yet(self, tmp_path):

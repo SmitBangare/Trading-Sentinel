@@ -12,6 +12,16 @@ months, rejecting 100% of signals with no health check ever catching it)
 requires this -- see tests/test_tv_fyers_gate_falsifiability.py, which
 mirrors tests/test_fno_gate_falsifiability.py's structure.
 
+[AI GATE 2026-09-25] The RSI-threshold veto that used to live here
+(`rsi_veto`) was removed. The directional-momentum judgment is now made
+by Claude reading the actual candles -- see tv_fyers_ai_gate.py's module
+docstring for why that gate is a deliberate exception to this codebase's
+"AI never gates a trade" rule, and why it is NOT part of this ladder
+(the ladder is synchronous pure functions; the AI call is an awaited
+network call, run as its own explicit step in tv_fyers_orchestrator.py
+right after this ladder passes). IV, liquidity and signal-freshness stay
+here, deterministic, on purpose.
+
 [MODULE NAMING] This file is intentionally `tv_fyers_gates.py`, not
 `fno_tv_gates.py` or similar -- tests/test_fno_isolation.py AST-walks
 every `fno_*`-prefixed module and forbids it from importing `engine`,
@@ -25,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
-from tv_fyers_veto import verify_rsi, verify_iv, verify_liquidity
+from tv_fyers_veto import verify_iv, verify_liquidity
 
 
 @dataclass
@@ -79,10 +89,6 @@ def _check_signal_freshness(ctx: GateContext) -> Tuple[bool, str]:
     return True, ""
 
 
-def _check_rsi(ctx: GateContext) -> Tuple[bool, str]:
-    return verify_rsi(ctx.direction, ctx.rsi)
-
-
 def _check_iv(ctx: GateContext) -> Tuple[bool, str]:
     return verify_iv(ctx.iv)
 
@@ -96,7 +102,6 @@ def _check_liquidity(ctx: GateContext) -> Tuple[bool, str]:
 
 ALL_ENTRY_GATES: List[Gate] = [
     Gate("signal_freshness", _check_signal_freshness, make_witness_context),
-    Gate("rsi_veto", _check_rsi, make_witness_context),
     Gate("iv_veto", _check_iv, make_witness_context),
     Gate("liquidity_veto", _check_liquidity, make_witness_context),
 ]

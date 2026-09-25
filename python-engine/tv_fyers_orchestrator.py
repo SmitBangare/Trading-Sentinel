@@ -6,9 +6,18 @@ continuous price monitoring regardless of whether a webhook has fired
 recently.
 
   handle_tv_entry_signal() -- called once per validated webhook arrival
-      (routes_tv_fyers.py). Staleness -> RSI/ATR off the underlying index
-      -> contract resolution -> double-check gates -> sizing -> paper
-      execution.
+      (routes_tv_fyers.py). Staleness -> candles/RSI/ATR off the
+      underlying index -> contract resolution -> deterministic gates
+      (freshness/IV/liquidity) -> AI candle-trend gate (tv_fyers_ai_gate.py)
+      -> sizing -> paper execution.
+
+  handle_ai_candle_scan() -- [ADDED 2026-09-25] a second, independent
+      entry path: its own APScheduler interval (scheduler_setup.py's
+      tv_ai_scan_tick), no TradingView alert involved at all. Claude reads
+      recent candles and decides the whole trade itself -- direction,
+      stop-loss and target -- see tv_fyers_ai_gate.py's "FULL PLANNER"
+      docstring section. Deterministic IV/liquidity gates and sizing
+      still run afterward, unchanged.
 
   run_tv_fyers_exit_tick() -- polling job (own APScheduler interval,
       scheduler_setup.py), manages every open TV_FYERS_* position: ports
@@ -16,7 +25,8 @@ recently.
       stop -> trailing stop after target -> premium backstop -> time
       stop -> hard flat), adapted to track the UNDERLYING SPOT INDEX
       rather than a futures price (see module docstring's "OPEN ITEM"
-      below for why).
+      below for why). Manages positions from EITHER entry path
+      identically -- it only ever looks at TV_FYERS_PAPER position rows.
 
 [OPEN ITEM -- flagged in the approved plan, not a bug] fno_orchestrator.py
 tracks NIFTY FUTURES price as its stop/trail state variable. Fyers'
@@ -53,9 +63,10 @@ from engine import calc_rsi_series, calc_atr
 from fno_chain import RISK_FREE_RATE, years_to_expiry
 from fno_costs import calc_fno_costs  # exchange-mandated STT/GST dominate; brokerage delta is small -- v1 approximation
 from options_math import implied_vol
+from tv_fyers_ai_gate import AiTradePlan, analyze_and_plan_trade, evaluate_trend_with_ai
 from tv_fyers_executor import TvFyersExecutor
 from tv_fyers_gates import GateContext as VetoContext, evaluate_tv_entry
-from tv_fyers_signal import TvFyersSignal, mark_signal_handled
+from tv_fyers_signal import TvFyersSignal, ingest_tv_signal, mark_signal_handled
 
 logger = structlog.get_logger()
 IST = pytz.timezone("Asia/Kolkata")
@@ -63,6 +74,40 @@ IST = pytz.timezone("Asia/Kolkata")
 # NIFTY spot index symbol on Fyers (needed for RSI/ATR even before any
 # option contract is resolved -- this part needs no instrument dump).
 _UNDERLYING_INDEX_SYMBOL = "NSE:NIFTY50-INDEX"
+
+
+async def _alert_entry(source_note: str, symbol: str, direction: str, lots: int,
+                        fill: float, stop_underlying: float, target_underlying: float) -> None:
+    """[REALTIME-ALERTS 2026-09-25] Best-effort Telegram page on every
+    paper entry, via the one alert helper this codebase trusts not to
+    fail silently (see operator_alert.py's own docstring). Never raises
+    -- a failed alert must not take down the trade it's reporting on."""
+    try:
+        from operator_alert import notify_operator
+        await notify_operator(
+            f"\U0001F4C8 TV->Fyers PAPER entry ({source_note}): {direction} {symbol} "
+            f"x{lots} lot(s) @ {fill:.2f}. Stop {stop_underlying:.1f} / "
+            f"Target {target_underlying:.1f} (underlying). Simulation only, "
+            f"no real capital at risk.",
+            event="tv_fyers_entry_alert",
+        )
+    except Exception as exc:
+        logger.error("tv_fyers_entry_alert_failed err=%s", str(exc))
+
+
+async def _alert_exit(symbol: str, reason: str, entry: float, exit_px: float,
+                       pnl: float, r_mult: float) -> None:
+    try:
+        from operator_alert import notify_operator
+        emoji = "\U0001F7E2" if pnl >= 0 else "\U0001F534"
+        await notify_operator(
+            f"{emoji} TV->Fyers PAPER exit: {symbol} closed ({reason}). "
+            f"Entry {entry:.2f} -> Exit {exit_px:.2f}. PnL {pnl:+.0f} "
+            f"({r_mult:+.2f}R). Simulation only, no real capital at risk.",
+            event="tv_fyers_exit_alert",
+        )
+    except Exception as exc:
+        logger.error("tv_fyers_exit_alert_failed err=%s", str(exc))
 
 # [LOT-SIZE 2026-09-25] NIFTY options lot size, effective from the
 # January 2026 NSE/SEBI index-derivatives contract-size revision
@@ -158,23 +203,26 @@ async def _resolve_option_contract(
     )
 
 
-async def _compute_rsi_and_atr(fyers, now_ist: datetime) -> tuple:
-    """RSI(14) and ATR(14) off the underlying INDEX candles -- no
-    instrument dump needed, unlike option-contract resolution."""
+async def _fetch_candles_rsi_atr(fyers, now_ist: datetime) -> tuple:
+    """Recent underlying-INDEX candles plus RSI(14)/ATR(14) off them -- no
+    instrument dump needed, unlike option-contract resolution. RSI is no
+    longer used to gate (see tv_fyers_ai_gate.py); it's still computed
+    cheaply and passed to the AI gate as supplementary context. ATR is
+    still load-bearing -- stop/target derivation below needs it."""
     from_date = (now_ist - timedelta(days=30)).strftime("%Y-%m-%d")
     to_date = now_ist.strftime("%Y-%m-%d")
     candles = await fyers.get_historical(
         _UNDERLYING_INDEX_SYMBOL, "5", from_date, to_date,
     )
     if not candles or len(candles) < settings.TV_FYERS_RSI_LENGTH + 1:
-        return None, None
+        return candles or [], None, None
     import pandas as pd
     df = pd.DataFrame(candles, columns=["ts", "open", "high", "low", "close", "volume"])
     rsi_series = calc_rsi_series(df["close"], length=settings.TV_FYERS_RSI_LENGTH)
     atr_series = calc_atr(df["high"], df["low"], df["close"])
     rsi = float(rsi_series.iloc[-1]) if not rsi_series.empty and rsi_series.iloc[-1] == rsi_series.iloc[-1] else None
     atr = float(atr_series.iloc[-1]) if not atr_series.empty and atr_series.iloc[-1] == atr_series.iloc[-1] else None
-    return rsi, atr
+    return candles, rsi, atr
 
 
 async def handle_tv_entry_signal(fyers, db_path: str, payload: dict) -> dict:
@@ -208,8 +256,8 @@ async def handle_tv_entry_signal(fyers, db_path: str, payload: dict) -> dict:
         await mark_signal_handled(db_path, signal.signal_id, result["reason"])
         return result
 
-    # ---- RSI/ATR off the underlying index (needs no instrument dump) --
-    rsi, atr = await _compute_rsi_and_atr(fyers, now_ist)
+    # ---- candles/RSI/ATR off the underlying index (needs no instrument dump) --
+    candles, rsi, atr = await _fetch_candles_rsi_atr(fyers, now_ist)
 
     # ---- contract resolution (real optionchain()-based lookup) --------
     contract = await _resolve_option_contract(
@@ -242,6 +290,19 @@ async def handle_tv_entry_signal(fyers, db_path: str, payload: dict) -> dict:
         result["reason"] = reject_reason
         logger.info(
             "tv_fyers_entry_rejected signal_id=%s reason=%s", signal.signal_id, reject_reason,
+        )
+        await mark_signal_handled(db_path, signal.signal_id, result["reason"])
+        return result
+
+    # ---- AI candle-trend gate (replaces the old RSI-threshold veto; see
+    # tv_fyers_ai_gate.py's module docstring for the safety posture) ------
+    ai_ok, ai_reason = await evaluate_trend_with_ai(
+        candles, signal.direction, signal.underlying_price, rsi=rsi,
+    )
+    if not ai_ok:
+        result["reason"] = ai_reason
+        logger.info(
+            "tv_fyers_entry_rejected signal_id=%s reason=%s", signal.signal_id, ai_reason,
         )
         await mark_signal_handled(db_path, signal.signal_id, result["reason"])
         return result
@@ -315,7 +376,143 @@ async def handle_tv_entry_signal(fyers, db_path: str, payload: dict) -> dict:
         signal.signal_id, contract.symbol, signal.direction, lots, fill,
         stop_underlying, target_underlying,
     )
+    await _alert_entry("TradingView alert", contract.symbol, signal.direction, lots,
+                        fill, stop_underlying, target_underlying)
     await mark_signal_handled(db_path, signal.signal_id, "executed")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# autonomous AI candle scan (no TradingView alert -- Claude decides the
+# whole trade itself: direction, stop-loss and target, straight from
+# recent candles). See tv_fyers_ai_gate.py's "FULL PLANNER" docstring
+# section for the safety posture. Deliberately NOT refactored to share
+# code with handle_tv_entry_signal() above -- this pipeline already has a
+# documented precedent (tv_fyers_positions.py's module docstring) for
+# preferring a duplicated-but-simple path over a shared abstraction when
+# the two paths' safety-relevant details (a TradingView-supplied
+# direction to double-check vs. an AI-originated direction to size and
+# execute) are different enough that sharing code would risk silently
+# blurring which trigger source is doing what.
+# ---------------------------------------------------------------------------
+
+async def handle_ai_candle_scan(fyers, db_path: str, now_ist: datetime) -> dict:
+    """One scheduler tick of the autonomous scan: fetch recent candles,
+    ask Claude whether there's a trade, and if so run it through the same
+    deterministic IV/liquidity gates and sizing math as every other entry
+    here before ever touching the paper executor. Every tick (including a
+    NO_TRADE decision) is persisted to tv_fyers_signals so the dashboard
+    shows what the AI saw and decided, not just the trades it took."""
+    result = {"signal_id": None, "executed": False, "reason": ""}
+
+    if settings.TV_FYERS_DISABLE_PAPER:
+        result["reason"] = "paper_disabled"
+        return result
+
+    candles, rsi, atr = await _fetch_candles_rsi_atr(fyers, now_ist)
+    if not candles:
+        result["reason"] = "ai_unavailable_no_candles"
+        return result
+    underlying_price = float(candles[-1][4])  # last candle's close
+
+    plan, plan_reason = await analyze_and_plan_trade(candles, underlying_price, rsi=rsi)
+
+    signal_id = f"ai-scan-{now_ist.strftime('%Y%m%dT%H%M%S')}"
+    result["signal_id"] = signal_id
+    await ingest_tv_signal(db_path, {
+        "signal_id": signal_id, "symbol": "NIFTY",
+        "direction": plan.direction if plan else "CE",  # schema requires CE/PE even for a no-trade tick
+        "underlying_price": underlying_price,
+        "strategy": "ai_candle_scan",
+        "signal_time": now_ist.isoformat(),
+    })
+
+    if plan is None:
+        result["reason"] = plan_reason
+        await mark_signal_handled(db_path, signal_id, plan_reason)
+        return result
+
+    open_now = await tvpos.open_positions(db_path, "TV_FYERS_PAPER")
+    if len(open_now) >= settings.TV_FYERS_MAX_CONCURRENT:
+        result["reason"] = "concurrency_cap"
+        await mark_signal_handled(db_path, signal_id, result["reason"])
+        return result
+
+    contract = await _resolve_option_contract(fyers, plan.direction, underlying_price, now_ist)
+    if contract is None:
+        result["reason"] = "symbol_resolution_unavailable"
+        await mark_signal_handled(db_path, signal_id, result["reason"])
+        return result
+
+    ctx = VetoContext(
+        direction=plan.direction, rsi=None, iv=contract.iv,
+        oi=contract.oi, volume=contract.volume,
+        bid=contract.bid, ask=contract.ask,
+        quote_age_sec=contract.quote_age_sec,
+        signal_age_sec=0.0, max_signal_age_sec=float(settings.TV_FYERS_SIGNAL_MAX_AGE_SEC),
+    )
+    ok, reject_reason = evaluate_tv_entry(ctx)
+    if not ok:
+        result["reason"] = reject_reason
+        logger.info("tv_ai_scan_entry_rejected signal_id=%s reason=%s", signal_id, reject_reason)
+        await mark_signal_handled(db_path, signal_id, result["reason"])
+        return result
+
+    from fno_risk import lots_for_pool, validate_position
+    from fno_models import Leg, OptionType
+    pool = float(settings.TV_FYERS_PAPER_BANKROLL)
+    lots = lots_for_pool(
+        pool, contract.ask, contract.lot_size,
+        settings.TV_FYERS_STOP_PREMIUM_PCT, settings.TV_FYERS_MAX_RISK_PCT,
+        settings.TV_FYERS_MAX_LOTS,
+    )
+    if lots < 1:
+        result["reason"] = "pool_below_min_viable"
+        await mark_signal_handled(db_path, signal_id, result["reason"])
+        return result
+
+    opt_type = OptionType.CE if plan.direction == "CE" else OptionType.PE
+    legs = [Leg(opt_type=opt_type, strike=0.0, quantity=lots, premium=contract.ask)]
+    ok_ml, reject_ml, max_loss = validate_position(legs, contract.lot_size)
+    if not ok_ml:
+        result["reason"] = reject_ml
+        await mark_signal_handled(db_path, signal_id, result["reason"])
+        return result
+
+    executor = TvFyersExecutor(
+        fyers, paper_mode=not settings.TV_FYERS_LIVE_TRADING, source_tag="TV_FYERS_PAPER",
+    )
+    qty = lots * contract.lot_size
+    exec_result = await executor.execute_entry(contract.symbol, qty, contract.ask)
+    if exec_result["status"] not in ("paper", "filled"):
+        result["reason"] = f"entry_{exec_result['status']}"
+        await mark_signal_handled(db_path, signal_id, result["reason"])
+        return result
+
+    fill = float(exec_result["fill_price"])
+    premium_stop = round((1.0 - settings.TV_FYERS_STOP_PREMIUM_PCT) * fill, 2)
+    await tvpos.insert_position(
+        db_path,
+        source="TV_FYERS_PAPER", signal_id=signal_id,
+        symbol=contract.symbol, direction=plan.direction, qty=qty,
+        entry_time=now_ist.isoformat(), entry_premium=fill,
+        entry_underlying=underlying_price, stop_underlying=plan.stop_underlying,
+        target_underlying=plan.target_underlying, premium_stop=premium_stop,
+        best_underlying=underlying_price, atr_at_entry=atr or 0.0,
+        entry_order_id=exec_result.get("order_id"),
+    )
+    result["executed"] = True
+    result["reason"] = ""
+    logger.info(
+        "tv_ai_scan_entry_submitted signal_id=%s symbol=%s direction=%s lots=%d "
+        "fill=%.2f stop_u=%.1f target_u=%.1f ai_reason=%s ai_confidence=%.2f",
+        signal_id, contract.symbol, plan.direction, lots, fill,
+        plan.stop_underlying, plan.target_underlying, plan.reason, plan.confidence,
+    )
+    await _alert_entry(f"AI scan, {plan.reason}, {plan.confidence:.0%} confidence",
+                        contract.symbol, plan.direction, lots, fill,
+                        plan.stop_underlying, plan.target_underlying)
+    await mark_signal_handled(db_path, signal_id, "executed")
     return result
 
 
@@ -496,6 +693,7 @@ async def run_tv_fyers_exit_tick(fyers, db_path: str, now_ist: Optional[datetime
             "pnl=%.0f r=%.2f",
             p.id, p.symbol, exit_reason, p.entry_premium, fill, pnl, r_mult,
         )
+        await _alert_exit(p.symbol, exit_reason, p.entry_premium, fill, pnl, r_mult)
         closed.append({
             "symbol": p.symbol, "reason": exit_reason, "entry": p.entry_premium,
             "exit": fill, "pnl": pnl, "r": r_mult,
