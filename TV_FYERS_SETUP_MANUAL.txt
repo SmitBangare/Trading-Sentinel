@@ -1,0 +1,155 @@
+================================================================
+TRADINGVIEW -> FYERS OPTIONS PIPELINE — SETUP MANUAL
+Branch: smit_fyers_options
+Last updated: 2026-09-25
+================================================================
+
+WHAT THIS IS
+------------
+A second, independent options-trading pipeline alongside the existing
+Zerodha-based NIFTY F&O module. Entries come from TradingView Pine
+Script webhook alerts; execution goes through Fyers (a different
+broker); the bot itself owns every exit (stop/trail/target — TradingView
+never signals an exit). It is PAPER-ONLY and triple-disarmed by default
+(TV_FYERS_LIVE_TRADING=False, TV_FYERS_LIVE_BANKROLL=0.0,
+TV_FYERS_DISABLE_LIVE=True in python-engine/config.py) — nothing here
+places a real order regardless of what credentials you configure.
+
+CURRENT STATUS (read before doing anything else)
+--------------------------------------------------
+Everything is built and tested EXCEPT one piece: picking an actual
+tradeable Fyers option contract (strike + expiry) for an incoming
+signal. python-engine/tv_fyers_orchestrator.py's
+`_resolve_option_contract()` is a deliberate stub that always returns
+None — every real webhook signal will currently be logged and rejected
+with reason "symbol_resolution_unavailable" until this is wired up
+against real Fyers instrument/options-chain data (which needs a real
+Fyers account to explore). Everything else — signal intake, the
+RSI/IV/liquidity double-check gates, sizing, paper execution, and exit
+management — is fully built and tested against a synthetic contract.
+
+You can complete every step below (including logging in to Fyers)
+without that piece existing; you just won't see a live paper trade
+appear yet.
+
+
+ONE-TIME SETUP
+--------------
+
+[1] Get a Fyers API app
+    Go to https://myapi.fyers.in/dashboard/, create an app. Note down:
+      - Client ID (looks like "ABCD1234-100")
+      - Secret Key
+    Set the app's redirect URI to:
+      http://localhost:3000/api/tv-fyers/auth/callback
+    (or your real public gateway host, if not running locally)
+
+[2] Edit node-gateway/server/.env
+    Replace the placeholder values with your real ones:
+      FYERS_CLIENT_ID=<your client id>
+      FYERS_SECRET_KEY=<your secret key>
+      FYERS_REDIRECT_URL=http://localhost:3000/api/tv-fyers/auth/callback
+      TV_FYERS_WEBHOOK_SECRET=<pick a long random string>
+
+[3] Edit python-engine/.env
+    Add (or confirm) — python-engine reads the Fyers client id directly
+    from the environment, not from config.py:
+      FYERS_CLIENT_ID=<same client id as step 2>
+    Also set the shared webhook secret to the SAME value as step 2:
+      TV_FYERS_WEBHOOK_SECRET=<same value as node-gateway's>
+
+[4] (Optional, only if you want a real public webhook URL for
+    TradingView) Expose node-gateway publicly the same way this repo
+    already does for the main dashboard — see SETUP_MANUAL.txt's ngrok/
+    tunnel notes, or docker-compose.yml's `ngrok` service.
+
+
+DAILY LOGIN (arms the paper leg with real Fyers market data)
+--------------------------------------------------------------
+Open in a browser:
+
+    http://localhost:3000/api/tv-fyers/auth/login
+
+This redirects to Fyers' real login page — log in with your Fyers
+credentials + 2FA. On success you're redirected back and:
+  - node-gateway stores the access token in memory (never on disk)
+  - the token is provisioned to python-engine automatically
+  - a Telegram alert confirms "Fyers authenticated successfully"
+
+Check status any time:
+
+    curl http://localhost:3000/api/tv-fyers/auth/status
+
+Log out (clears the token on both sides):
+
+    curl -X POST http://localhost:3000/api/tv-fyers/auth/logout
+
+
+TRADINGVIEW ALERT SETUP
+------------------------
+A starter Pine Script (v5) is at pine-scripts/tv_fyers_orb_alert.pine —
+an illustrative opening-range-breakout signal that produces correctly-
+shaped webhook alerts. It is not a production strategy; adapt the entry
+logic as you see fit, but do NOT add exit alerts — the pipeline is
+built assuming TradingView only ever signals entries.
+
+  1. Paste the script into TradingView's Pine Editor, add to a NIFTY
+     chart (5-min timeframe).
+  2. Set the `webhookSecret` input to match TV_FYERS_WEBHOOK_SECRET.
+  3. Create a TradingView Alert on the script's alert condition, enable
+     Webhook, and point it at:
+       http://<your-public-gateway-host>/api/tv-fyers/webhook
+     (TradingView needs a real public URL — localhost will not work
+     unless TradingView itself is also running locally, which it isn't)
+
+
+VERIFYING THE PIPELINE END TO END (without a real TradingView alert)
+------------------------------------------------------------------------
+Send a synthetic signal directly to confirm the wiring works:
+
+    curl -X POST http://localhost:3000/api/tv-fyers/webhook \
+      -H "Content-Type: application/json" \
+      -d '{
+        "secret": "<your TV_FYERS_WEBHOOK_SECRET>",
+        "symbol": "NIFTY",
+        "direction": "CE",
+        "underlying_price": 24500.5,
+        "strategy": "manual_test",
+        "signal_time": "<current UTC ISO-8601 timestamp>"
+      }'
+
+Expect: {"received": true, "signal_id": "...", "forwarded": true}. Then
+check python-engine's logs for `tv_fyers_signal_ingested` and (today)
+`tv_fyers_symbol_resolution_not_implemented` — the latter confirms the
+signal reached the orchestrator and was correctly held back pending the
+contract-resolution piece above, rather than silently vanishing or
+fabricating a trade.
+
+
+USEFUL LOG LINES TO GREP FOR
+------------------------------
+  tv_fyers_signal_ingested        — a webhook signal was received + persisted
+  tv_fyers_entry_rejected         — RSI/IV/liquidity veto blocked an entry
+  tv_fyers_entry_submitted        — a paper entry was executed
+  tv_fyers_position_closed        — a paper position was exited (with reason)
+  tv_fyers_exit_tick_complete     — the 90s exit-management poll ran
+  tv_fyers_token_set              — Fyers access token armed
+  tv_fyers_symbol_resolution_not_implemented — expected until the contract-
+                                     resolution piece is built (see above)
+
+
+NEXT STEP TO ACTUALLY SEE A PAPER TRADE
+------------------------------------------
+Once logged in with real Fyers credentials, explore Fyers' options-
+chain/instrument data (there is no bulk instrument-dump endpoint
+documented the way Kite has one — options chain quotes are fetched
+per-symbol) and wire up `_resolve_option_contract()` in
+python-engine/tv_fyers_orchestrator.py: pick a strike near
+`underlying_price` and the nearest tradeable expiry, construct the
+Fyers option symbol, and return a `ResolvedContract` from a fresh
+quote. Everything downstream (gates, sizing, paper execution, exit
+management) is already built and tested to receive it.
+
+================================================================
+END OF MANUAL
+================================================================

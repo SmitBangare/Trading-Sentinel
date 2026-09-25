@@ -131,10 +131,17 @@ def calc_rsi_series(close: pd.Series, length: int = 14) -> pd.Series:
         rs = avg_gain / avg_loss
         rsi_values[length] = 100.0 - (100.0 / (1.0 + rs))
 
-    # Wilder smoothing for remaining periods
+    # Wilder smoothing for remaining periods. `gains`/`losses` come from
+    # np.diff(prices), so gains[k] is the delta ENDING at prices[k+1] --
+    # the delta ending at prices[i] is therefore gains[i-1], not gains[i].
+    # [SMIT-FYERS-OPTIONS 2026-09-25 bugfix] The off-by-one previously here
+    # (gains[i]/losses[i]) indexed one past the end of the n-1-length
+    # arrays on the loop's last iteration, so this function raised
+    # IndexError on every call where n > length + 1 -- i.e. on any
+    # realistic input. Confirmed via direct reproduction before fixing.
     for i in range(length + 1, n):
-        avg_gain = (avg_gain * (length - 1) + gains[i]) / length
-        avg_loss = (avg_loss * (length - 1) + losses[i]) / length
+        avg_gain = (avg_gain * (length - 1) + gains[i - 1]) / length
+        avg_loss = (avg_loss * (length - 1) + losses[i - 1]) / length
         if avg_loss == 0:
             rsi_values[i] = 100.0
         else:

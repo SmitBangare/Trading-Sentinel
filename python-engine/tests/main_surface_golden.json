@@ -457,6 +457,38 @@
       "response_model": null
     },
     {
+      "endpoint": "get_tv_fyers_option_chain",
+      "methods": [
+        "GET"
+      ],
+      "path": "/internal/tv-fyers/optionchain",
+      "response_model": null
+    },
+    {
+      "endpoint": "post_tv_fyers_signal",
+      "methods": [
+        "POST"
+      ],
+      "path": "/internal/tv-fyers/signal",
+      "response_model": null
+    },
+    {
+      "endpoint": "post_tv_fyers_token",
+      "methods": [
+        "POST"
+      ],
+      "path": "/internal/tv-fyers/token",
+      "response_model": null
+    },
+    {
+      "endpoint": "post_tv_fyers_token_invalidate",
+      "methods": [
+        "POST"
+      ],
+      "path": "/internal/tv-fyers/token/invalidate",
+      "response_model": null
+    },
+    {
       "endpoint": "cas_eligibility",
       "methods": [
         "GET"

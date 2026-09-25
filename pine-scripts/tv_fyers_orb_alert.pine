@@ -1,0 +1,112 @@
+// [SMIT-FYERS-OPTIONS 2026-09-25] Starter TradingView alert template for the
+// TradingView -> Fyers options pipeline (branch smit_fyers_options).
+//
+// WHAT THIS SCRIPT IS AND ISN'T
+// ------------------------------
+// This is a minimal, illustrative opening-range-breakout ENTRY signal --
+// enough to produce correctly-shaped webhook alerts end to end, not a
+// production trading strategy. The bot on the receiving end (see
+// python-engine/tv_fyers_gates.py) independently re-checks RSI/IV/
+// liquidity before ever executing anything, and OWNS every exit itself
+// (stop/trail/target) -- this script only ever signals ENTRIES. Do not
+// add exit alerts here; the pipeline is built assuming it never receives
+// one, and stop_loss/target fields are deliberately absent from the
+// payload contract below.
+//
+// SETUP
+// -----
+// 1. Add this script to a NIFTY chart (5-minute timeframe recommended,
+//    matching FNO_OR_MINUTES-style opening-range logic elsewhere in the
+//    repo).
+// 2. Set the `webhookSecret` input below to the SAME value as
+//    TV_FYERS_WEBHOOK_SECRET in node-gateway/server/.env and
+//    python-engine/.env (must match exactly on both sides).
+// 3. In TradingView, create an Alert on this script's "TV Fyers Entry"
+//    alert condition, with Webhook URL enabled, pointed at:
+//      https://<your-public-gateway-host>/api/tv-fyers/webhook
+//    (needs a real public URL -- see SETUP_MANUAL.txt's ngrok/tunnel
+//    notes for how this repo already exposes node-gateway publicly).
+// 4. Leave the alert's own "Message" box EMPTY / default -- this script
+//    builds the exact JSON body itself via alert(), so TradingView's
+//    static message template is not used.
+//
+// PAYLOAD CONTRACT (must match routes/tv-fyers-webhook.js's Zod schema
+// and python-engine/tv_fyers_signal.py's TvFyersSignal model exactly):
+//   {
+//     "secret": "...",              shared secret, plaintext (TradingView
+//                                    cannot sign requests or set headers)
+//     "symbol": "NIFTY",
+//     "direction": "CE" | "PE",     CE = long bias, PE = short bias
+//     "underlying_price": 24500.5,  close price at signal bar
+//     "strategy": "orb_momentum_v1",
+//     "signal_time": "2026-09-25T09:47:00+05:30"   ISO-8601, NSE = always IST
+//   }
+// No stop_loss/target fields -- the bot derives and owns every exit itself.
+
+//@version=5
+indicator("TV -> Fyers ORB Alert", overlay=true)
+
+// ---- inputs ---------------------------------------------------------
+webhookSecret = input.string("REPLACE_ME_dummy_placeholder_not_a_real_secret_0004",
+     "Webhook shared secret", tooltip="Must exactly match TV_FYERS_WEBHOOK_SECRET in both .env files")
+orMinutes     = input.int(15, "Opening range minutes", minval=5, maxval=60)
+orBufferAtr   = input.float(0.25, "OR breakout buffer (x ATR)", minval=0.0)
+atrLength     = input.int(14, "ATR length", minval=1)
+emaFastLen    = input.int(21, "EMA fast", minval=1)
+emaSlowLen    = input.int(50, "EMA slow", minval=1)
+
+// ---- session / opening range -----------------------------------------
+inSession   = not na(time(timeframe.period, "0915-1525:23456", "Asia/Kolkata"))
+sessionOpen = timestamp("Asia/Kolkata", year, month, dayofmonth, 9, 15)
+orEndTime   = sessionOpen + orMinutes * 60 * 1000
+inOrWindow  = time >= sessionOpen and time < orEndTime
+afterOrWindow = time >= orEndTime
+
+var float orHigh = na
+var float orLow  = na
+newDay = ta.change(time("D")) != 0
+if newDay
+    orHigh := na
+    orLow  := na
+if inOrWindow
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow  := na(orLow) ? low : math.min(orLow, low)
+
+// ---- indicators --------------------------------------------------------
+atrVal   = ta.atr(atrLength)
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+
+// ---- breakout levels + fresh-break condition ---------------------------
+longLevel  = orHigh + orBufferAtr * atrVal
+shortLevel = orLow  - orBufferAtr * atrVal
+
+longBreak  = afterOrWindow and not na(orHigh) and close > longLevel and close[1] <= longLevel
+shortBreak = afterOrWindow and not na(orLow)  and close < shortLevel and close[1] >= shortLevel
+
+longSignal  = longBreak  and emaFast > emaSlow and inSession
+shortSignal = shortBreak and emaFast < emaSlow and inSession
+
+// ---- build the exact webhook JSON payload -------------------------------
+// str.format_time gives IST wall-clock time; NSE is always +05:30, no DST,
+// so the offset suffix is safely hardcoded rather than computed.
+signalTimeIso = str.format_time(time, "yyyy-MM-dd'T'HH:mm:ss", "Asia/Kolkata") + "+05:30"
+
+buildPayload(direction) =>
+    '{"secret":"' + webhookSecret + '",' +
+     '"symbol":"NIFTY",' +
+     '"direction":"' + direction + '",' +
+     '"underlying_price":' + str.tostring(close, format.mintick) + ',' +
+     '"strategy":"orb_momentum_v1",' +
+     '"signal_time":"' + signalTimeIso + '"}'
+
+if longSignal
+    alert(buildPayload("CE"), alert.freq_once_per_bar_close)
+if shortSignal
+    alert(buildPayload("PE"), alert.freq_once_per_bar_close)
+
+// ---- chart markers (visual confirmation only, not part of the contract) --
+plot(orHigh, "OR High", color=color.new(color.teal, 0), style=plot.style_stepline)
+plot(orLow,  "OR Low",  color=color.new(color.maroon, 0), style=plot.style_stepline)
+plotshape(longSignal,  title="CE signal", style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small)
+plotshape(shortSignal, title="PE signal", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small)

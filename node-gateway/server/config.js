@@ -19,6 +19,17 @@ const configSchema = z.object({
   SESSION_SECRET: z.string().min(32),
   INTERNAL_API_SECRET: z.string().min(32),
   OPENCLAW_WEBHOOK_SECRET: z.string().min(32),
+  // Shared secret TradingView embeds in its Pine Script alert body (TradingView
+  // webhook alerts cannot set custom headers or sign requests, so a body-field
+  // shared secret is the only auth mechanism available on that side -- see
+  // routes/tv-fyers-webhook.js). Must equal python-engine's TV_FYERS_WEBHOOK_SECRET.
+  TV_FYERS_WEBHOOK_SECRET: z.string().min(32),
+
+  // Fyers OAuth app credentials (from https://myapi.fyers.in/dashboard/),
+  // separate app/broker from Zerodha -- see routes/tv-fyers-auth.js.
+  FYERS_CLIENT_ID: z.string().min(1),
+  FYERS_SECRET_KEY: z.string().min(1),
+  FYERS_REDIRECT_URL: z.string().url(),
   
   PYTHON_ENGINE_URL: z.string().url().default('http://python-engine:8000'),
   PYTHON_ENGINE_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),

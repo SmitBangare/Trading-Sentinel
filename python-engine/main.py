@@ -113,6 +113,7 @@ from scheduler_setup import (
     register_fno_scheduler_jobs,
     register_partner_scheduler_jobs,
     register_penny_scheduler_jobs,
+    register_tv_fyers_scheduler_jobs,
 )
 
 
@@ -149,6 +150,13 @@ from penny_scanner import PennyScanner
 # app = FastAPI(title="Quant Engine Container B")
 logger = structlog.get_logger()
 kite = KiteClient(settings.DB_PATH)
+# [SMIT-FYERS-OPTIONS 2026-09-25] Separate broker client for the
+# TradingView -> Fyers options pipeline -- no shared state with `kite`
+# above. Token is armed separately (own login flow, not yet wired as of
+# rollout step 3); until set_token() is called, any use raises RuntimeError,
+# which is correct: nothing should be calling it yet.
+from fyers_client import FyersClient
+fyers = FyersClient(settings.DB_PATH)
 scheduler = AsyncIOScheduler(
     timezone="Asia/Kolkata",
     # 2026-06-22 fix: penny crons (hourly report, regime refresh, EOD,
@@ -2011,6 +2019,9 @@ async def lifespan(app: FastAPI):
     # self-improvement loop. Idempotent.
     from analytics import init_analytics_db
     await init_analytics_db(settings.DB_PATH)
+    # [SMIT-FYERS-OPTIONS 2026-09-25] TradingView -> Fyers signal log. Idempotent.
+    from tv_fyers_signal import init_tv_fyers_signal_db
+    await init_tv_fyers_signal_db(settings.DB_PATH)
     # [ROADMAP-2.8 2026-07-12] ops_liveness_daily / ops_funnel_daily.
     try:
         from ops_metrics import init_ops_metrics_db
@@ -2162,6 +2173,11 @@ async def lifespan(app: FastAPI):
     # unconditional; every job's first line checks PARTNER_BOT_ENABLED
     # and returns instantly when off (zero Kite calls, zero sends).
     register_partner_scheduler_jobs(scheduler)
+    # [SMIT-FYERS-OPTIONS 2026-09-25] TradingView -> Fyers options pipeline
+    # exit-management tick. Paper-only, triple-disarmed (see config.py);
+    # self-gates to market hours and skips entirely until a Fyers token
+    # is armed (no login flow wired up yet).
+    register_tv_fyers_scheduler_jobs(scheduler)
 
     # Durable timing facts complement the existing liveness heartbeat.  The
     # listener records APScheduler misfires/max-instance rejections while the
@@ -4599,6 +4615,7 @@ from routes_promotion_readiness import router as _promotion_readiness_router
 from routes_hedge import router as _hedge_router
 from routes_holidays import router as _holidays_router  # WORKFLOW-J.5
 from routes_market_session import router as _market_session_router
+from routes_tv_fyers import router as _tv_fyers_router  # SMIT-FYERS-OPTIONS
 
 app.include_router(_ops_router)
 app.include_router(_portfolio_router)
@@ -4610,3 +4627,4 @@ app.include_router(_promotion_readiness_router)
 app.include_router(_hedge_router)
 app.include_router(_holidays_router)  # WORKFLOW-J.5
 app.include_router(_market_session_router)
+app.include_router(_tv_fyers_router)  # SMIT-FYERS-OPTIONS

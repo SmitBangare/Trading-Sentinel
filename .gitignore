@@ -17,3 +17,10 @@ __pycache__/
 .DS_Store
 *venv/
 logs/
+
+# Fyers SDK runtime logs (auto-created by fyers_apiv3, not source)
+python-engine/fyersApi.log
+python-engine/fyersRequests.log
+
+# Runtime state (not static reference data)
+python-engine/data/scheduler_tick.json

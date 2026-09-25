@@ -160,6 +160,11 @@
     "trigger": "'cron'"
   },
   {
+    "func": "_run_tv_fyers_exit_tick_safe",
+    "id": "'tv_fyers_exit_tick'",
+    "trigger": "'interval'"
+  },
+  {
     "func": "_scheduler_tick_job",
     "id": "'scheduler_tick'",
     "trigger": "'interval'"

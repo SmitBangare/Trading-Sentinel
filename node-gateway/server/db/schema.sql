@@ -124,3 +124,25 @@ BEGIN
     THEN RAISE(ABORT, 'Invalid status for executed_orders')
   END;
 END;
+
+-- [SMIT-FYERS-OPTIONS 2026-09-25] TradingView -> Fyers options pipeline.
+-- Entry signals only (the bot owns every exit -- see tv_fyers_orchestrator.py
+-- in python-engine). Separate table from received_signals: different
+-- schema/source, and this pipeline must never be confused with the
+-- Zerodha-based equity signal path above.
+CREATE TABLE IF NOT EXISTS tv_fyers_signals (
+  signal_id        TEXT PRIMARY KEY,
+  symbol           TEXT NOT NULL,
+  direction        TEXT NOT NULL CHECK (direction IN ('CE','PE')),
+  underlying_price REAL NOT NULL,
+  strategy         TEXT,
+  signal_time      TEXT NOT NULL,
+  received_at      TEXT NOT NULL,
+  payload_json     TEXT NOT NULL,
+  forwarded        INTEGER NOT NULL DEFAULT 0,
+  forward_status   TEXT,
+  telegram_msg_id  INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_tv_fyers_signals_symbol_time
+  ON tv_fyers_signals(symbol, signal_time);

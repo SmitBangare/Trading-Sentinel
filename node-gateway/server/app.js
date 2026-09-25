@@ -101,6 +101,12 @@ app.use('/api/token', security.limiters.token, require('./routes/token'));
 app.use('/api/proxy', require('./routes/proxy'));
 app.use('/api/health', require('./routes/health'));
 app.use('/api/internal', require('./routes/internal'));
+// [SMIT-FYERS-OPTIONS 2026-09-25] TradingView -> Fyers entry-signal receiver.
+// Reuses the existing generic "webhook" limiter (100 req/min) rather than
+// the equity-signal-specific one at /api/signals above.
+app.use('/api/tv-fyers', security.limiters.webhook, require('./routes/tv-fyers-webhook'));
+// Fyers OAuth login flow (separate broker/app from Zerodha's /api/auth).
+app.use('/api/tv-fyers/auth', require('./routes/tv-fyers-auth'));
 
 
 // 7. React Static File Serving

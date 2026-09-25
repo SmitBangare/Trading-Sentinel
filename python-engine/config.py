@@ -1541,5 +1541,62 @@ class Settings(BaseSettings):
     # without a recorded research basis.
     CAPITAL_POLICY_REQUIRE_PROACTIVE_EVIDENCE:   bool  = True
 
+    # ========================================================================
+    # TradingView -> Fyers options pipeline (smit_fyers_options branch)
+    # ------------------------------------------------------------------------
+    # Signal source: TradingView Pine Script webhook alerts (entries only).
+    # Execution broker: Fyers (separate from the Zerodha-based FNO module
+    # above -- no shared state, no shared broker client). The bot itself
+    # owns every exit (stop/trail/target); TradingView never sends an exit.
+    #
+    # Triple-disarm, mirrors the FNO_* pattern above exactly: live trading
+    # is false, live bankroll is zero, and live is explicitly disabled --
+    # all three independently, all three default-safe from this first
+    # commit. Do not flip any of these without an explicit, separate,
+    # deliberate decision once a paper-mode qualification test has been
+    # reviewed.
+    # ========================================================================
+    TV_FYERS_PAPER_BANKROLL:      float = 250000.0
+    TV_FYERS_LIVE_BANKROLL:       float = 0.0        # not armed
+    TV_FYERS_LIVE_TRADING:        bool  = False       # master switch
+    TV_FYERS_DISABLE_PAPER:       bool  = False
+    TV_FYERS_DISABLE_LIVE:        bool  = True
+
+    # Shared secret TradingView embeds in its alert body (node-gateway
+    # validates this; python-engine never sees the TradingView secret,
+    # only the existing INTERNAL_API_SECRET from node-gateway itself).
+    TV_FYERS_WEBHOOK_SECRET:      str   = ""          # must be set in .env
+
+    # --- entry double-check thresholds (server-side veto over TV alerts) ---
+    TV_FYERS_RSI_LENGTH:          int   = 14
+    TV_FYERS_RSI_LONG_MIN:        float = 50.0        # CE only if RSI >= this
+    TV_FYERS_RSI_LONG_MAX:        float = 80.0        # reject if overbought
+    TV_FYERS_RSI_SHORT_MAX:       float = 50.0        # PE only if RSI <= this
+    TV_FYERS_RSI_SHORT_MIN:       float = 20.0        # reject if oversold
+
+    TV_FYERS_IV_SANITY_MIN:       float = 0.05
+    TV_FYERS_IV_SANITY_MAX:       float = 1.00
+
+    TV_FYERS_MIN_OI:              int   = 5000
+    TV_FYERS_MIN_VOL:             int   = 1000
+    TV_FYERS_MAX_SPREAD_PCT:      float = 0.015
+    TV_FYERS_MAX_QUOTE_AGE_SEC:   int   = 120
+
+    # --- sizing / risk -------------------------------------------------
+    TV_FYERS_STOP_PREMIUM_PCT:    float = 0.25
+    TV_FYERS_MAX_RISK_PCT:        float = 0.02
+    TV_FYERS_MAX_LOTS:            int   = 2
+    TV_FYERS_MAX_CONCURRENT:      int   = 2
+    TV_FYERS_MAX_TRADES_PER_DAY:  int   = 3
+
+    # --- exit management (bot-owned; TradingView never signals exits) --
+    TV_FYERS_TARGET_R:            float = 1.8
+    TV_FYERS_TRAIL_ATR_MULT:      float = 1.0
+    TV_FYERS_TIME_STOP_MIN:       int   = 45
+
+    # --- scheduling ------------------------------------------------------
+    TV_FYERS_SCAN_INTERVAL_SEC:   int   = 90          # exit-management poll
+    TV_FYERS_SIGNAL_MAX_AGE_SEC:  int   = 300          # webhook staleness
+
 
 settings = Settings()
