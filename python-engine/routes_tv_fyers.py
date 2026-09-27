@@ -105,6 +105,43 @@ async def get_tv_fyers_positions_route(request: Request, status: str = "ALL", li
     return {"positions": rows}
 
 
+@router.post("/internal/tv-fyers/backtest/run")
+async def post_tv_fyers_backtest_run(
+    request: Request, days_back: int = 365, refresh_cache: bool = False,
+):
+    """[SMIT-FYERS-OPTIONS-BACKTEST 2026-09-25] Mechanics-only backtest
+    (see tv_fyers_backtest.py's module docstring for exactly what's real
+    data vs. modelled -- no AI, no cost). Fetches real NIFTY candle
+    history from Fyers (needs an armed token) ONLY when no local cache
+    exists or refresh_cache=true; otherwise replays against the cached
+    history for free and instantly. A fresh fetch for days_back=365 is a
+    real, possibly slow, chunked network operation."""
+    _main._check_internal_secret(request, "post_tv_fyers_backtest_run")
+    from tv_fyers_backtest import (
+        fetch_nifty_history, load_cached_history, result_to_dict,
+        run_backtest, save_cached_history,
+    )
+    candles = None if refresh_cache else load_cached_history(settings.DB_PATH)
+    fetched_fresh = False
+    if candles is None:
+        if not _main.fyers.access_token:
+            raise HTTPException(
+                status_code=409,
+                detail="No cached history and no armed Fyers token -- log in "
+                       "via /api/tv-fyers/auth/login first, or retry once armed.",
+            )
+        candles = await fetch_nifty_history(_main.fyers, days_back=days_back)
+        save_cached_history(settings.DB_PATH, candles)
+        fetched_fresh = True
+    result = run_backtest(candles)
+    logger.info(
+        "tv_fyers_backtest_run_complete candles=%d signals=%d entries=%d trades=%d pnl=%.0f fetched_fresh=%s",
+        len(candles), result.signals_generated, result.entries_taken,
+        len(result.trades), result.total_pnl, fetched_fresh,
+    )
+    return {"fetched_fresh": fetched_fresh, "candle_count": len(candles), **result_to_dict(result)}
+
+
 @router.post("/internal/tv-fyers/signal")
 async def post_tv_fyers_signal(request: Request):
     _main._check_internal_secret(request, "post_tv_fyers_signal")

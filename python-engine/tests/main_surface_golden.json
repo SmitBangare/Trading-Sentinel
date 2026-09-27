@@ -457,6 +457,14 @@
       "response_model": null
     },
     {
+      "endpoint": "post_tv_fyers_backtest_run",
+      "methods": [
+        "POST"
+      ],
+      "path": "/internal/tv-fyers/backtest/run",
+      "response_model": null
+    },
+    {
       "endpoint": "get_tv_fyers_option_chain",
       "methods": [
         "GET"

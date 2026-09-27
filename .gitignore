@@ -24,3 +24,6 @@ python-engine/fyersRequests.log
 
 # Runtime state (not static reference data)
 python-engine/data/scheduler_tick.json
+
+# Fetched market data cache (large, regenerable via /internal/tv-fyers/backtest/run)
+python-engine/data/nifty_5min_history_cache.json
