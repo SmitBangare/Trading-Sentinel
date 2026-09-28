@@ -1,9 +1,10 @@
-import React from 'react';
-import { Activity, ArrowLeft, Radio, ShieldCheck, ShieldOff, TrendingDown, TrendingUp } from 'lucide-react';
+import React, { useState } from 'react';
+import { Activity, ArrowLeft, PlayCircle, Radio, ShieldCheck, ShieldOff, TrendingDown, TrendingUp } from 'lucide-react';
 import StatusBar from '../components/StatusBar';
 import { useTvFyersStatus } from '../hooks/useTvFyersStatus';
 import { useTvFyersSignals } from '../hooks/useTvFyersSignals';
 import { useTvFyersPositions } from '../hooks/useTvFyersPositions';
+import { useTvFyersBacktest } from '../hooks/useTvFyersBacktest';
 
 // [SMIT-FYERS-OPTIONS 2026-09-25] Human-readable explanations for every
 // outcome the orchestrator can write to a signal's `handled_result`
@@ -148,6 +149,76 @@ function ClosedPositionRow({ p }) {
   );
 }
 
+function BacktestPanel() {
+  const { result, running, error, run } = useTvFyersBacktest();
+  const [daysBack, setDaysBack] = useState(365);
+
+  return (
+    <SectionCard
+      title="Backtest (mechanics-only, no AI, no cost)"
+      note="Replays a faithful port of the starter ORB Pine Script against real Fyers candle history, through the exact same gates/sizing/exit code the live bot runs. Option prices are MODELLED (Black-76 off realised volatility) — not real historical quotes — and liquidity checks are assumed-passing since no historical options liquidity data exists anywhere. Treat results as a directional signal, not proof of a profitable strategy. First run for a given window fetches from Fyers (needs an armed token, may take a minute); after that it's cached and instant."
+    >
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="text-xs text-gray-400">
+          Days back
+          <input
+            type="number" min="30" max="730" value={daysBack}
+            onChange={(e) => setDaysBack(Number(e.target.value))}
+            className="ml-2 w-24 rounded border border-gray-700 bg-gray-950 p-1.5 text-sm text-gray-100"
+          />
+        </label>
+        <button
+          onClick={() => run({ daysBack })}
+          disabled={running}
+          className="flex items-center gap-2 rounded-lg border border-violet-600 bg-violet-950 px-4 py-2 text-sm font-bold text-violet-100 hover:bg-violet-900 disabled:opacity-50"
+        >
+          <PlayCircle size={16} /> {running ? 'Running…' : 'Run backtest'}
+        </button>
+        <button
+          onClick={() => run({ daysBack, refreshCache: true })}
+          disabled={running}
+          className="text-xs text-gray-500 hover:text-gray-300 underline disabled:opacity-50"
+        >
+          Refetch fresh data from Fyers (ignore cache)
+        </button>
+      </div>
+
+      {error && <div className="mt-3 rounded border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">{error}</div>}
+
+      {result && (
+        <div className="mt-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatusTile icon={Activity} label="Signals" value={result.signals_generated} good note="ORB breakouts detected in the window." />
+            <StatusTile icon={PlayCircle} label="Entries taken" value={result.entries_taken} good note="Cleared every gate and were simulated." />
+            <StatusTile
+              icon={result.total_pnl >= 0 ? TrendingUp : TrendingDown}
+              label="Total P&L" value={fmtMoney(result.total_pnl)} good={result.total_pnl >= 0}
+              note="Sum across every trade in the full run."
+            />
+            <StatusTile
+              icon={Activity} label="Win rate"
+              value={result.win_rate !== null ? `${(result.win_rate * 100).toFixed(1)}%` : '—'}
+              good={result.win_rate !== null && result.win_rate >= 0.4}
+              note={`${result.win_count} wins / ${result.loss_count} losses`}
+            />
+          </div>
+          <div className="rounded border border-gray-800 bg-gray-950/70 p-3 text-xs text-gray-400">
+            Avg R-multiple: <b className="text-gray-200">{result.avg_r_multiple !== null ? result.avg_r_multiple.toFixed(2) : '—'}</b>
+            {' · '}Max drawdown: <b className="text-gray-200">{fmtMoney(result.max_drawdown)}</b>
+            {' · '}Candles used: <b className="text-gray-200">{result.candle_count}</b>
+            {' · '}Fetched fresh: <b className="text-gray-200">{result.fetched_fresh ? 'yes' : 'no (cached)'}</b>
+          </div>
+          {Object.keys(result.rejections_by_reason || {}).length > 0 && (
+            <div className="rounded border border-gray-800 bg-gray-950/70 p-3 text-xs text-gray-400">
+              Rejected signals by reason: {Object.entries(result.rejections_by_reason).map(([r, c]) => `${r} (${c})`).join(', ')}
+            </div>
+          )}
+        </div>
+      )}
+    </SectionCard>
+  );
+}
+
 export default function TvFyers({ navigateToDashboard }) {
   const { status, isLoading: statusLoading } = useTvFyersStatus();
   const { signals, isLoading: signalsLoading } = useTvFyersSignals();
@@ -277,6 +348,8 @@ export default function TvFyers({ navigateToDashboard }) {
             </div>
           )}
         </SectionCard>
+
+        <BacktestPanel />
       </div>
     </div>
   );

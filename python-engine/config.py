@@ -1590,6 +1590,10 @@ class Settings(BaseSettings):
     TV_FYERS_AI_MODEL:            str   = "claude-sonnet-5"
     TV_FYERS_AI_TIMEOUT_SEC:      float = 15.0
     TV_FYERS_AI_MAX_CANDLES:      int   = 30
+    # [CONFIDENCE-FLOOR 2026-09-28] A PASS/ENTER decision below this
+    # confidence is treated as a reject/no-trade -- a model that says
+    # "yes, but I'm not sure" is not the same as a model that's sure.
+    TV_FYERS_AI_MIN_CONFIDENCE:  float = 0.6
 
     # [AI-SCAN 2026-09-25] Autonomous candle-scan entry path (no
     # TradingView alert -- see tv_fyers_orchestrator.handle_ai_candle_scan).

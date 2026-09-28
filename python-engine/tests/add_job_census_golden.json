@@ -185,6 +185,11 @@
     "trigger": "'cron'"
   },
   {
+    "func": "_tv_fyers_premarket_login_nudge",
+    "id": "'tv_fyers_premarket_login_nudge'",
+    "trigger": "'cron'"
+  },
+  {
     "func": "auto_square_momentum",
     "id": "'momentum_auto_square'",
     "trigger": "'cron'"

@@ -140,6 +140,17 @@ async def evaluate_trend_with_ai(
             direction, reason, confidence,
         )
         return False, f"ai_reject_{reason}"
+    if confidence < settings.TV_FYERS_AI_MIN_CONFIDENCE:
+        # [CONFIDENCE-FLOOR 2026-09-28] A model that says "PASS" while
+        # admitting it isn't sure is not the same as a model that's sure.
+        # Treat an under-threshold PASS as a reject rather than trusting
+        # the label alone -- same fail-closed spirit as every other check
+        # in this module.
+        logger.info(
+            "tv_fyers_ai_gate_low_confidence direction=%s reason=%s confidence=%.2f threshold=%.2f",
+            direction, reason, confidence, settings.TV_FYERS_AI_MIN_CONFIDENCE,
+        )
+        return False, "ai_reject_low_confidence"
     logger.info(
         "tv_fyers_ai_gate_pass direction=%s reason=%s confidence=%.2f",
         direction, reason, confidence,
@@ -237,6 +248,14 @@ async def analyze_and_plan_trade(
         if decision == "NO_TRADE":
             logger.info("tv_ai_scan_no_trade reason=%s confidence=%.2f", reason, confidence)
             return None, f"ai_no_trade_{reason}"
+        if confidence < settings.TV_FYERS_AI_MIN_CONFIDENCE:
+            # [CONFIDENCE-FLOOR 2026-09-28] Same floor as evaluate_trend_with_ai --
+            # an under-threshold ENTER is treated as no-trade, not acted on.
+            logger.info(
+                "tv_ai_scan_low_confidence direction=%s reason=%s confidence=%.2f threshold=%.2f",
+                decision, reason, confidence, settings.TV_FYERS_AI_MIN_CONFIDENCE,
+            )
+            return None, "ai_no_trade_low_confidence"
         stop = parsed.get("stop_underlying")
         target = parsed.get("target_underlying")
         if isinstance(stop, bool) or not isinstance(stop, (int, float)):

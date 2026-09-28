@@ -1365,3 +1365,39 @@ def register_tv_fyers_scheduler_jobs(scheduler):
         "tv_fyers_cron_registered id=tv_ai_scan_tick interval=%ds max_instances=1 coalesce=True",
         settings.TV_FYERS_AI_SCAN_INTERVAL_SEC,
     )
+
+    # [LOGIN-NUDGE 2026-09-28] Mirrors daily_bootstrap.py's
+    # premarket_login_nudge (same rationale: the engine starts every
+    # session token-blind, and the only prior signal was silence until
+    # someone happened to check the dashboard). Fyers has no equivalent
+    # of the penny module's ~55-min universe refresh -- there is nothing
+    # to "finish in time" here, just a token that needs to exist before
+    # 09:15 -- so a flat 25-minute lead at 08:50 is generous rather than
+    # timed against a downstream job's own runtime. No-ops silently when
+    # the token is already armed, so a punctual operator hears nothing.
+    @telemetry_job(settings.DB_PATH, "tv_fyers_premarket_login_nudge")
+    async def _tv_fyers_premarket_login_nudge():
+        now_ist = datetime.now(IST)
+        if not await _main.is_trading_day(now_ist.date(), settings.DB_PATH):
+            return
+        if settings.TV_FYERS_DISABLE_PAPER:
+            return
+        if _main.fyers.access_token:
+            logger.info("tv_fyers_premarket_login_nudge_skipped reason=token_already_armed")
+            return
+        from operator_alert import notify_operator
+        await notify_operator(
+            "🔑 TV->Fyers: no Fyers token armed yet and the market opens in "
+            "25 minutes. Log in at /api/tv-fyers/auth/login before 09:15, or "
+            "neither entry path (TradingView webhook or the AI scanner) can "
+            "do anything today.",
+            event="tv_fyers_premarket_login_nudge",
+        )
+
+    scheduler.add_job(
+        _tv_fyers_premarket_login_nudge, "cron",
+        hour=8, minute=50,
+        id="tv_fyers_premarket_login_nudge",
+        max_instances=1, coalesce=True, misfire_grace_time=600,
+    )
+    logger.info("tv_fyers_cron_registered id=tv_fyers_premarket_login_nudge trigger=cron(08:50) max_instances=1")

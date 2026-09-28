@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from tv_fyers_ai_gate import evaluate_trend_with_ai
+from tv_fyers_ai_gate import AiTradePlan, analyze_and_plan_trade, evaluate_trend_with_ai
 
 
 def _candles(n=20):
@@ -134,6 +134,21 @@ class TestSuccessPaths:
         assert reason == "ai_reject_choppynocleartrend"
 
     @pytest.mark.asyncio
+    async def test_low_confidence_pass_is_treated_as_reject(self, monkeypatch):
+        """[CONFIDENCE-FLOOR 2026-09-28] A PASS below TV_FYERS_AI_MIN_CONFIDENCE
+        (default 0.6) must not be trusted -- the model said "yes, but I'm
+        not sure", which is not the same as "yes"."""
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response('{"decision": "PASS", "reason": "maybe_uptrend", "confidence": 0.4}')
+            )
+            ok, reason = await evaluate_trend_with_ai(_candles(), "CE", 24500.0)
+        assert ok is False
+        assert reason == "ai_reject_low_confidence"
+
+    @pytest.mark.asyncio
     async def test_markdown_fenced_response_is_still_rejected_not_parsed(self, monkeypatch):
         """The model was told not to wrap the JSON in a code fence; if it
         does anyway, this must fail closed rather than attempt fragile
@@ -147,3 +162,124 @@ class TestSuccessPaths:
             ok, reason = await evaluate_trend_with_ai(_candles(), "CE", 24500.0)
         assert ok is False
         assert reason == "ai_malformed_response"
+
+
+class TestAnalyzeAndPlanTrade:
+    """analyze_and_plan_trade() is the autonomous full-planner path (no
+    TradingView alert). Previously only exercised indirectly through
+    mocks in test_tv_fyers_orchestrator.py; this covers its own parsing/
+    validation logic directly."""
+
+    @pytest.mark.asyncio
+    async def test_no_key_fails_closed(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "")
+        plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert plan is None
+        assert reason == "ai_unavailable_no_key"
+
+    @pytest.mark.asyncio
+    async def test_no_trade_decision_returns_none(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response('{"decision": "NO_TRADE", "reason": "choppy", "confidence": 0.7}')
+            )
+            plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert plan is None
+        assert reason == "ai_no_trade_choppy"
+
+    @pytest.mark.asyncio
+    async def test_valid_enter_ce_produces_a_plan(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response(
+                    '{"decision": "ENTER_CE", "stop_underlying": 24400.0, "target_underlying": 24700.0, "reason": "strong_uptrend", "confidence": 0.85}'
+                )
+            )
+            plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert isinstance(plan, AiTradePlan)
+        assert plan.direction == "CE"
+        assert plan.stop_underlying == 24400.0
+        assert plan.target_underlying == 24700.0
+        assert reason == "ai_plan_strong_uptrend"
+
+    @pytest.mark.asyncio
+    async def test_valid_enter_pe_produces_a_plan(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response(
+                    '{"decision": "ENTER_PE", "stop_underlying": 24600.0, "target_underlying": 24300.0, "reason": "strong_downtrend", "confidence": 0.85}'
+                )
+            )
+            plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert plan.direction == "PE"
+        assert plan.stop_underlying == 24600.0
+        assert plan.target_underlying == 24300.0
+
+    @pytest.mark.asyncio
+    async def test_ce_stop_on_wrong_side_of_price_fails_closed(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response(
+                    '{"decision": "ENTER_CE", "stop_underlying": 24600.0, "target_underlying": 24700.0, "reason": "bad_plan", "confidence": 0.85}'
+                )
+            )
+            plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert plan is None
+        assert reason == "ai_malformed_response"
+
+    @pytest.mark.asyncio
+    async def test_missing_stop_underlying_on_enter_fails_closed(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response(
+                    '{"decision": "ENTER_CE", "target_underlying": 24700.0, "reason": "no_stop", "confidence": 0.85}'
+                )
+            )
+            plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert plan is None
+        assert reason == "ai_malformed_response"
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_enter_is_treated_as_no_trade(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response(
+                    '{"decision": "ENTER_CE", "stop_underlying": 24400.0, "target_underlying": 24700.0, "reason": "unsure_uptrend", "confidence": 0.35}'
+                )
+            )
+            plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert plan is None
+        assert reason == "ai_no_trade_low_confidence"
+
+    @pytest.mark.asyncio
+    async def test_invalid_decision_value_fails_closed(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        with patch("anthropic.AsyncAnthropic") as mock_cls:
+            mock_cls.return_value.messages.create = AsyncMock(
+                return_value=_mock_response('{"decision": "MAYBE", "reason": "unsure", "confidence": 0.9}')
+            )
+            plan, reason = await analyze_and_plan_trade(_candles(), 24500.0)
+        assert plan is None
+        assert reason == "ai_malformed_response"
+
+    @pytest.mark.asyncio
+    async def test_no_candles_fails_closed(self, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_ANTHROPIC_API_KEY", "test-key")
+        plan, reason = await analyze_and_plan_trade([], 24500.0)
+        assert plan is None
+        assert reason == "ai_unavailable_no_candles"

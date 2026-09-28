@@ -102,6 +102,12 @@ router.get('/tv-fyers/signals', (req, res) =>
   proxyToEngine(req, res, withQuery('/internal/tv-fyers/signals', req.query)));
 router.get('/tv-fyers/positions', (req, res) =>
   proxyToEngine(req, res, withQuery('/internal/tv-fyers/positions', req.query)));
+// A fresh (uncached) fetch chunks a year of Fyers history across several
+// real network calls -- a longer, dedicated budget, separate from the
+// generic backtestTimeoutMs below (which this route predates using).
+router.post('/tv-fyers/backtest/run', (req, res) =>
+  proxyToEngine(req, res, withQuery('/internal/tv-fyers/backtest/run', req.query), 'POST',
+    { timeoutMs: 120000 }));
 
 // Backtest Lab submits background work, so requests never hold an HTTP socket
 // for the duration of a replay. The longer budget protects SQLite contention

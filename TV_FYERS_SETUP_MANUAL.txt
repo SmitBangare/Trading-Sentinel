@@ -114,6 +114,57 @@ gate ladder (post-close spreads are expected to be wide and get vetoed).
    this pipeline's optional credentials) -- until then these alerts are
    attempted, fail, and get logged, exactly as designed.
 
+[CHANGED 2026-09-28] Autonomous work session, no explicit ask per item
+(user requested continuous improvement without pausing to confirm each
+one). Six changes:
+
+5. DATA-ACCURACY FIX: Fyers' history endpoint is queried by DATE, not
+   exact timestamp, so when called mid-session it was ambiguous whether
+   the last returned candle was genuinely closed or still-forming (its
+   "close" just the LTP at query time). tv_fyers_orchestrator.py now
+   defensively drops any trailing candle whose 5-minute window hasn't
+   actually elapsed yet before computing RSI/ATR or handing candles to
+   the AI, regardless of what Fyers' server actually does with a
+   mid-session query.
+
+6. AI PREMARKET LOGIN NUDGE: a new cron job (08:50 IST daily,
+   tv_fyers_premarket_login_nudge) pages Telegram if no Fyers token is
+   armed 25 minutes before market open -- mirrors daily_bootstrap.py's
+   existing Zerodha-side premarket_login_nudge. Silent when the token is
+   already fresh.
+
+7. AI CONFIDENCE FLOOR: TV_FYERS_AI_MIN_CONFIDENCE (default 0.6) in
+   config.py. A PASS/ENTER decision below this threshold is now treated
+   as a reject/no-trade (reason=ai_reject_low_confidence or
+   ai_no_trade_low_confidence) rather than trusted at face value -- a
+   model that says "yes, but I'm not sure" is not the same as "yes".
+   Applies to both the veto gate and the full planner.
+
+8. BACKTEST DASHBOARD PANEL: the TV -> Fyers dashboard page now has a
+   "Run backtest" button (previously required a direct curl call to
+   POST /internal/tv-fyers/backtest/run). Shows signals/entries/P&L/win
+   rate/drawdown/rejection breakdown inline, with the same modelled-vs-
+   real-data caveats from tv_fyers_backtest.py's docstring shown on the
+   page itself.
+
+9. RELIABILITY: python-engine and node-gateway now run under
+   self-restarting wrapper scripts (run/run_python_engine.ps1,
+   run/run_node_gateway.ps1) instead of bare process launches -- either
+   one restarts itself within 5 seconds if it crashes. Registering them
+   as Windows Scheduled Tasks (trigger: at log on) makes both start
+   automatically after a reboot; see run/start_python_engine.bat and
+   run/start_node_gateway.bat and the schtasks commands used to register
+   them (a one-time manual step -- the coding agent's own sandboxed
+   session cannot register scheduled tasks itself, hit "Access is
+   denied" attempting it).
+
+10. TEST COVERAGE: analyze_and_plan_trade() (the full planner) previously
+    had zero direct unit tests -- only exercised indirectly through
+    mocks in test_tv_fyers_orchestrator.py. Added a full
+    TestAnalyzeAndPlanTrade class covering fail-closed paths, valid
+    ENTER_CE/ENTER_PE parsing, stop/target-on-wrong-side validation, and
+    the new confidence floor.
+
 
 ONE-TIME SETUP
 --------------

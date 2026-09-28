@@ -123,6 +123,32 @@ async def _init_dbs(db_path):
     await init_tv_fyers_positions_db(db_path)
 
 
+class TestDropUnclosedTrailingCandle:
+    """[DATA-ACCURACY 2026-09-28] RSI/ATR/signal generation must never
+    see a still-forming candle -- Fyers' history endpoint is queried by
+    date, not exact timestamp, so this is a defensive trim regardless of
+    what the server actually does with a mid-session query."""
+
+    def test_drops_a_candle_whose_window_has_not_closed_yet(self):
+        now = _ist(2026, 9, 25, 10, 3)  # 10:00-10:05 candle is still open
+        candles = [
+            [int(_ist(2026, 9, 25, 9, 55).timestamp()), 100, 101, 99, 100, 10],
+            [int(_ist(2026, 9, 25, 10, 0).timestamp()), 100, 101, 99, 100, 10],  # closes 10:05 -- not yet
+        ]
+        out = orch._drop_unclosed_trailing_candle(candles, now)
+        assert len(out) == 1
+        assert out[0][0] == candles[0][0]
+
+    def test_keeps_a_candle_at_the_exact_close_instant(self):
+        now = _ist(2026, 9, 25, 10, 5)  # exactly when the 10:00 candle closes
+        candles = [[int(_ist(2026, 9, 25, 10, 0).timestamp()), 100, 101, 99, 100, 10]]
+        out = orch._drop_unclosed_trailing_candle(candles, now)
+        assert len(out) == 1
+
+    def test_empty_input_returns_empty(self):
+        assert orch._drop_unclosed_trailing_candle([], _ist(2026, 9, 25, 10, 5)) == []
+
+
 class TestResolveOptionContract:
     @pytest.mark.asyncio
     async def test_picks_nearest_strike_for_ce(self):

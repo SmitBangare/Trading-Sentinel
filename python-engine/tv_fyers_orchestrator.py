@@ -203,6 +203,29 @@ async def _resolve_option_contract(
     )
 
 
+_CANDLE_RESOLUTION_SEC = 300  # "5" (minutes) resolution, matches the get_historical call below
+
+
+def _drop_unclosed_trailing_candle(candles: list, now_ist: datetime) -> list:
+    """[DATA-ACCURACY 2026-09-28] Fyers' history endpoint is queried by
+    DATE (`to_date`), not by exact timestamp -- when called mid-session
+    it is unclear from the wrapper alone whether the server's last
+    returned row is a genuinely closed 5-min bar or a still-forming one
+    whose close is just the LTP at query time (the two look identical in
+    shape; only the timestamp math tells them apart). Rather than trust
+    that ambiguity, defensively drop any trailing candle whose window
+    hasn't actually elapsed yet, so RSI/ATR/signal generation only ever
+    sees definitively closed bars. A closed candle's own OHLC (built by
+    the exchange from every real tick in its window) is already the most
+    accurate representation possible -- more accurate than anything this
+    codebase could reconstruct from periodically-sampled LTP itself,
+    which would risk missing intra-window spikes between samples."""
+    if not candles:
+        return candles
+    now_epoch = now_ist.timestamp()
+    return [c for c in candles if c[0] + _CANDLE_RESOLUTION_SEC <= now_epoch]
+
+
 async def _fetch_candles_rsi_atr(fyers, now_ist: datetime) -> tuple:
     """Recent underlying-INDEX candles plus RSI(14)/ATR(14) off them -- no
     instrument dump needed, unlike option-contract resolution. RSI is no
@@ -214,6 +237,7 @@ async def _fetch_candles_rsi_atr(fyers, now_ist: datetime) -> tuple:
     candles = await fyers.get_historical(
         _UNDERLYING_INDEX_SYMBOL, "5", from_date, to_date,
     )
+    candles = _drop_unclosed_trailing_candle(candles, now_ist)
     if not candles or len(candles) < settings.TV_FYERS_RSI_LENGTH + 1:
         return candles or [], None, None
     import pandas as pd
