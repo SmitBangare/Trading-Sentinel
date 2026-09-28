@@ -21,7 +21,7 @@ import pytest
 import pytz
 
 import tv_fyers_orchestrator as orch
-from tv_fyers_positions import init_tv_fyers_positions_db, open_positions, insert_position
+from tv_fyers_positions import init_tv_fyers_positions_db, open_positions, insert_position, settle_position_close
 from tv_fyers_signal import init_tv_fyers_signal_db
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -624,3 +624,98 @@ class TestRunTvFyersExitTick:
         out = await orch.run_tv_fyers_exit_tick(fyers, db_path, _ist(2026, 9, 25, 10, 0))
         assert len(out["exits"]) == 1
         assert out["exits"][0]["reason"] == "time_stop"
+
+
+class TestConsecutiveLossStreak:
+    """[LOSS-STREAK-ALERT 2026-09-28] Alert-only, never a pause -- paper
+    trading has no real money at stake (see config.py's
+    TV_FYERS_CONSECUTIVE_LOSS_ALERT docstring)."""
+
+    async def _closed_position(self, db_path, pnl, **overrides):
+        base = dict(
+            source="TV_FYERS_PAPER", signal_id=f"sig-{pnl}", symbol="NSE:NIFTY24SEP24500CE",
+            direction="CE", qty=65, entry_time=datetime.now().isoformat(),
+            entry_premium=120.0, entry_underlying=24500.0, stop_underlying=24400.0,
+            target_underlying=24700.0, premium_stop=90.0, best_underlying=24500.0,
+            atr_at_entry=50.0,
+        )
+        base.update(overrides)
+        position_id = await insert_position(db_path, **base)
+        exit_premium = 120.0 + pnl / 65.0
+        await settle_position_close(
+            db_path, position_id, exit_time_ist=_ist(2026, 9, 25, 14, 0),
+            exit_premium=exit_premium, exit_underlying=24500.0, exit_reason="test",
+            gross_pnl=pnl, costs=0.0, pnl=pnl, r_multiple=pnl / 1000.0, exit_order_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_does_not_alert(self, tmp_path):
+        db_path = str(tmp_path / "streak.db")
+        await init_tv_fyers_positions_db(db_path)
+        for _ in range(2):
+            await self._closed_position(db_path, pnl=-500.0)
+
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            await orch._check_consecutive_loss_streak(db_path)
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exactly_at_threshold_alerts(self, tmp_path):
+        db_path = str(tmp_path / "streak.db")
+        await init_tv_fyers_positions_db(db_path)
+        for _ in range(3):
+            await self._closed_position(db_path, pnl=-500.0)
+
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            await orch._check_consecutive_loss_streak(db_path)
+        mock_notify.assert_awaited_once()
+        assert mock_notify.call_args.kwargs.get("event") == "tv_fyers_loss_streak_alert"
+
+    @pytest.mark.asyncio
+    async def test_non_multiple_of_threshold_does_not_realert(self, tmp_path):
+        db_path = str(tmp_path / "streak.db")
+        await init_tv_fyers_positions_db(db_path)
+        for _ in range(4):
+            await self._closed_position(db_path, pnl=-500.0)
+
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            await orch._check_consecutive_loss_streak(db_path)
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_double_threshold_alerts_again(self, tmp_path):
+        db_path = str(tmp_path / "streak.db")
+        await init_tv_fyers_positions_db(db_path)
+        for _ in range(6):
+            await self._closed_position(db_path, pnl=-500.0)
+
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            await orch._check_consecutive_loss_streak(db_path)
+        mock_notify.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_win_breaks_the_streak(self, tmp_path):
+        """3 losses, then a win -- the streak counts from the most recent
+        close backward and must stop at the win, not keep counting."""
+        db_path = str(tmp_path / "streak.db")
+        await init_tv_fyers_positions_db(db_path)
+        for _ in range(3):
+            await self._closed_position(db_path, pnl=-500.0)
+        await self._closed_position(db_path, pnl=+500.0)
+
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            await orch._check_consecutive_loss_streak(db_path)
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_disabled_when_threshold_is_zero(self, tmp_path, monkeypatch):
+        from config import settings
+        monkeypatch.setattr(settings, "TV_FYERS_CONSECUTIVE_LOSS_ALERT", 0)
+        db_path = str(tmp_path / "streak.db")
+        await init_tv_fyers_positions_db(db_path)
+        for _ in range(10):
+            await self._closed_position(db_path, pnl=-500.0)
+
+        with patch("operator_alert.notify_operator", AsyncMock(return_value=True)) as mock_notify:
+            await orch._check_consecutive_loss_streak(db_path)
+        mock_notify.assert_not_called()

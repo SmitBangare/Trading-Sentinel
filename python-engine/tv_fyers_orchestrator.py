@@ -109,6 +109,37 @@ async def _alert_exit(symbol: str, reason: str, entry: float, exit_px: float,
     except Exception as exc:
         logger.error("tv_fyers_exit_alert_failed err=%s", str(exc))
 
+
+async def _check_consecutive_loss_streak(db_path: str) -> None:
+    """[LOSS-STREAK-ALERT 2026-09-28] Paper trading risks no real money,
+    so this is an ALERT, not an auto-pause -- see config.py's
+    TV_FYERS_CONSECUTIVE_LOSS_ALERT docstring for why. Fires once at the
+    threshold, then again every further multiple of it, so a long cold
+    streak doesn't go silent but a single loss never spams."""
+    threshold = settings.TV_FYERS_CONSECUTIVE_LOSS_ALERT
+    if threshold <= 0:
+        return
+    recent = await tvpos.list_positions(db_path, source="TV_FYERS_PAPER", status="CLOSED", limit=threshold * 3)
+    streak = 0
+    for row in recent:  # newest-first
+        pnl = row.get("pnl")
+        if pnl is None or pnl > 0:
+            break
+        streak += 1
+    if streak > 0 and streak % threshold == 0:
+        try:
+            from operator_alert import notify_operator
+            await notify_operator(
+                f"⚠️ TV->Fyers PAPER: {streak} losing trades in a row. "
+                f"Simulation only, no real capital at risk -- but if you've been "
+                f"manually trading off these signals, worth pausing to check the "
+                f"strategy before continuing.",
+                event="tv_fyers_loss_streak_alert",
+            )
+        except Exception as exc:
+            logger.error("tv_fyers_loss_streak_alert_failed err=%s", str(exc))
+
+
 # [LOT-SIZE 2026-09-25] NIFTY options lot size, effective from the
 # January 2026 NSE/SEBI index-derivatives contract-size revision
 # (lot sizes were rebased to keep notional value inside the SEBI-
@@ -734,6 +765,7 @@ async def run_tv_fyers_exit_tick(fyers, db_path: str, now_ist: Optional[datetime
             p.id, p.symbol, exit_reason, p.entry_premium, fill, pnl, r_mult,
         )
         await _alert_exit(p.symbol, exit_reason, p.entry_premium, fill, pnl, r_mult)
+        await _check_consecutive_loss_streak(db_path)
         closed.append({
             "symbol": p.symbol, "reason": exit_reason, "entry": p.entry_premium,
             "exit": fill, "pnl": pnl, "r": r_mult,

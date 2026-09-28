@@ -1595,6 +1595,14 @@ class Settings(BaseSettings):
     # "yes, but I'm not sure" is not the same as a model that's sure.
     TV_FYERS_AI_MIN_CONFIDENCE:  float = 0.6
 
+    # [LOSS-STREAK-ALERT 2026-09-28] Paper trading has no real money at
+    # stake, so this is deliberately an ALERT, not an auto-pause -- the
+    # value is telling a human who's manually trading off these signals
+    # "the bot is cold right now", not stopping the paper simulation
+    # itself. Fires at this many consecutive losses, then again every
+    # further multiple of it (3, 6, 9, ...) rather than on every loss.
+    TV_FYERS_CONSECUTIVE_LOSS_ALERT: int = 3
+
     # [AI-SCAN 2026-09-25] Autonomous candle-scan entry path (no
     # TradingView alert -- see tv_fyers_orchestrator.handle_ai_candle_scan).
     # 300s matches the 5-minute candle resolution the AI actually reads;

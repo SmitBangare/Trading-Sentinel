@@ -165,6 +165,15 @@ one). Six changes:
     ENTER_CE/ENTER_PE parsing, stop/target-on-wrong-side validation, and
     the new confidence floor.
 
+11. CONSECUTIVE-LOSS STREAK ALERT: TV_FYERS_CONSECUTIVE_LOSS_ALERT
+    (default 3) in config.py. Every exit tick checks the most recent
+    closed paper trades; on the 3rd consecutive loss (and every further
+    multiple of 3 -- 6, 9, ...) it sends a Telegram alert. Deliberately
+    an ALERT, not an auto-pause -- paper trading has no real money at
+    stake, so the value is telling a human who's manually trading off
+    these signals "the bot is cold right now", not stopping the
+    simulation itself.
+
 
 ONE-TIME SETUP
 --------------
