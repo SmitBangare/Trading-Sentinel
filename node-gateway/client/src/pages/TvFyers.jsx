@@ -40,6 +40,27 @@ function humanizeReason(reason) {
   if (!reason) return { label: 'Received, not processed yet', tone: 'warn', desc: 'Either still in flight, or the orchestrator crashed before recording an outcome — investigate if this persists.' };
   if (OUTCOME_INFO[reason]) return OUTCOME_INFO[reason];
   if (reason.startsWith('entry_')) return { label: `Broker rejected: ${reason.slice(6)}`, tone: 'bad', desc: 'The paper/live executor itself reported a non-success status.' };
+  // [SMIT-FYERS-OPTIONS-AI 2026-09-28] These AI-driven reasons carry a
+  // dynamic suffix (the model's own short explanation), so they can't be
+  // exact-matched in OUTCOME_INFO above -- handled by prefix instead.
+  // ai_pass_*/ai_plan_* (the AI's own success reasons) never actually
+  // reach here: a fully successful entry is persisted as "executed", not
+  // its intermediate AI reason -- see tv_fyers_orchestrator.py.
+  if (reason.startsWith('ai_reject_')) {
+    const why = reason.slice('ai_reject_'.length).replace(/_/g, ' ') || 'unspecified';
+    return { label: `AI declined: ${why}`, tone: 'warn', desc: 'Claude read the candles and judged the trend didn’t support this direction right now — a real analysis call, not a system error.' };
+  }
+  if (reason.startsWith('ai_no_trade_')) {
+    const why = reason.slice('ai_no_trade_'.length).replace(/_/g, ' ') || 'unspecified';
+    return { label: `AI saw no trade: ${why}`, tone: 'warn', desc: 'The autonomous scanner looked at this candle and deliberately chose not to propose anything — most scans should end here, not in a trade.' };
+  }
+  if (reason.startsWith('ai_unavailable_')) {
+    const why = reason.slice('ai_unavailable_'.length).replace(/_/g, ' ');
+    return { label: `AI unavailable: ${why}`, tone: 'bad', desc: 'The AI check itself couldn’t run (no key configured, or a real error) and failed closed — no trade was risked on an unchecked signal.' };
+  }
+  if (reason === 'ai_malformed_response') {
+    return { label: 'AI response unusable', tone: 'bad', desc: 'The model’s reply couldn’t be parsed into a valid decision — failed closed rather than guessing at what it meant.' };
+  }
   return { label: reason.replace(/_/g, ' '), tone: 'warn', desc: 'Rejected by an entry safety gate. Raw reason code shown as the label.' };
 }
 
